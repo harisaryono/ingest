@@ -1,0 +1,335 @@
+<!DOCTYPE html>
+<html lang="id">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>RAG Search</title>
+<style>
+:root{
+  --bg:#0f1115;
+  --panel:#161a22;
+  --panel-2:#1d2330;
+  --text:#eef2ff;
+  --muted:#9aa4b2;
+  --line:rgba(255,255,255,.08);
+  --accent:#78d7ff;
+  --accent-2:#a6ffcb;
+  --shadow:0 20px 60px rgba(0,0,0,.35);
+}
+*{box-sizing:border-box}
+html,body{margin:0;min-height:100%}
+body{
+  font-family:Inter,ui-sans-serif,system-ui,-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif;
+  color:var(--text);
+  background:
+    radial-gradient(circle at top left, rgba(120,215,255,.18), transparent 32%),
+    radial-gradient(circle at top right, rgba(166,255,203,.12), transparent 28%),
+    linear-gradient(180deg,#0b0d11 0%, #11151c 45%, #0b0d11 100%);
+}
+.wrap{max-width:1100px;margin:0 auto;padding:28px 18px 48px}
+.hero{
+  display:grid;
+  gap:18px;
+  padding:28px;
+  border:1px solid var(--line);
+  border-radius:24px;
+  background:linear-gradient(180deg, rgba(22,26,34,.95), rgba(17,21,28,.9));
+  box-shadow:var(--shadow);
+}
+.eyebrow{
+  font-size:12px;
+  letter-spacing:.16em;
+  text-transform:uppercase;
+  color:var(--accent);
+}
+h1{
+  margin:0;
+  font-size:clamp(32px,6vw,58px);
+  line-height:1;
+}
+.lead{
+  margin:0;
+  max-width:72ch;
+  color:var(--muted);
+  line-height:1.6;
+  font-size:15px;
+}
+.controls{
+  display:grid;
+  grid-template-columns:1fr auto;
+  gap:12px;
+  margin-top:8px;
+}
+@media (max-width:760px){
+  .controls{grid-template-columns:1fr}
+}
+.query{
+  width:100%;
+  min-height:64px;
+  resize:vertical;
+  border:1px solid var(--line);
+  border-radius:16px;
+  padding:16px 18px;
+  font-size:16px;
+  color:var(--text);
+  background:rgba(255,255,255,.03);
+  outline:none;
+}
+.query:focus{border-color:rgba(120,215,255,.4);box-shadow:0 0 0 4px rgba(120,215,255,.12)}
+.panel{
+  border:1px solid var(--line);
+  border-radius:18px;
+  background:rgba(255,255,255,.03);
+  padding:14px;
+}
+.row{
+  display:flex;
+  flex-wrap:wrap;
+  gap:10px;
+  align-items:center;
+}
+select,button{
+  border-radius:14px;
+  border:1px solid var(--line);
+  background:var(--panel-2);
+  color:var(--text);
+  font-size:14px;
+  padding:12px 14px;
+}
+button{
+  cursor:pointer;
+  background:linear-gradient(135deg,var(--accent),var(--accent-2));
+  color:#071018;
+  font-weight:700;
+  border:none;
+  min-width:120px;
+}
+button:disabled{opacity:.55;cursor:not-allowed}
+.results{
+  margin-top:18px;
+  display:grid;
+  gap:14px;
+}
+.result{
+  border:1px solid var(--line);
+  border-radius:20px;
+  background:linear-gradient(180deg, rgba(255,255,255,.04), rgba(255,255,255,.02));
+  padding:18px;
+  box-shadow:0 8px 30px rgba(0,0,0,.18);
+}
+.result-head{
+  display:flex;
+  flex-wrap:wrap;
+  gap:10px;
+  justify-content:space-between;
+  align-items:flex-start;
+  margin-bottom:10px;
+}
+.title{
+  font-size:18px;
+  font-weight:700;
+  line-height:1.35;
+}
+.score{
+  font-size:12px;
+  color:#071018;
+  background:var(--accent-2);
+  padding:6px 10px;
+  border-radius:999px;
+  font-weight:800;
+  white-space:nowrap;
+}
+.meta{
+  color:var(--muted);
+  font-size:13px;
+  margin-bottom:12px;
+}
+.snippet{
+  white-space:pre-wrap;
+  line-height:1.7;
+  color:#dde5f2;
+  font-size:14px;
+}
+.snippet mark{
+  background:rgba(120,215,255,.18);
+  color:inherit;
+  padding:0 .14em;
+  border-radius:4px;
+}
+.footer{
+  margin-top:18px;
+  color:var(--muted);
+  font-size:13px;
+}
+.status{
+  margin-top:12px;
+  color:var(--muted);
+  font-size:14px;
+}
+.empty{
+  padding:22px;
+  border:1px dashed var(--line);
+  border-radius:18px;
+  color:var(--muted);
+  background:rgba(255,255,255,.02);
+}
+a{color:var(--accent);text-decoration:none}
+a:hover{text-decoration:underline}
+</style>
+</head>
+<body>
+<div class="wrap">
+  <section class="hero">
+    <div class="eyebrow">RAG Buku Islam</div>
+    <h1>Search hasil dari koleksi buku</h1>
+    <p class="lead">
+      Cari isi buku lalu lihat langsung cuplikan chunk yang paling relevan, lengkap dengan skor, judul buku, dan rentang halaman.
+      Tampilan ini sederhana, fokus ke pencarian, dan tidak memaksa jawaban generatif.
+    </p>
+
+    <div class="controls">
+      <textarea id="query" class="query" rows="2" placeholder="Contoh: apa itu islam, hukum sholat, atau siapa Allah?"></textarea>
+      <button id="btn" onclick="searchBooks()">Cari</button>
+    </div>
+
+    <div class="panel">
+      <div class="row">
+        <label for="language">Bahasa</label>
+        <select id="language">
+          <option value="id">Indonesia</option>
+          <option value="all">Semua</option>
+          <option value="en">English</option>
+        </select>
+        <label for="topk">Top hasil</label>
+        <select id="topk">
+          <option value="3">3</option>
+          <option value="5" selected>5</option>
+          <option value="8">8</option>
+        </select>
+      </div>
+      <div class="status" id="status">Siap mencari.</div>
+    </div>
+  </section>
+
+  <section class="results" id="results"></section>
+
+  <div class="footer">
+    Endpoint yang dipakai: <code>/search</code>. Hasil klik bisa dibuka ke halaman buku per halaman.
+  </div>
+</div>
+
+<script>
+const API_BASE = (() => {
+  const params = new URLSearchParams(window.location.search);
+  const override = params.get('api');
+  if (override) return override.replace(/\/$/, '');
+  if (window.location.protocol === 'file:') return 'http://127.0.0.1:8000';
+  if (window.location.origin && window.location.origin !== 'null') return window.location.origin;
+  return 'http://127.0.0.1:8000';
+})();
+
+function escapeHtml(text){
+  return text
+    .replaceAll('&','&amp;')
+    .replaceAll('<','&lt;')
+    .replaceAll('>','&gt;')
+    .replaceAll('"','&quot;')
+    .replaceAll("'","&#39;");
+}
+
+function highlight(text, query){
+  const words = query
+    .toLowerCase()
+    .split(/\s+/)
+    .map(w => w.replace(/[.,;:!?()[\]{}"'`]/g, ''))
+    .filter(w => w.length >= 3);
+  let safe = escapeHtml(text);
+  words.forEach(word => {
+    const re = new RegExp(`(${word.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')})`, 'ig');
+    safe = safe.replace(re, '<mark>$1</mark>');
+  });
+  return safe;
+}
+
+function formatSnippet(text, query){
+  const clean = text.replace(/\s+/g, ' ').trim();
+  if (clean.length <= 360) return highlight(clean, query);
+  return highlight(clean.slice(0, 360) + '...', query);
+}
+
+async function searchBooks(){
+  const q = document.getElementById('query').value.trim();
+  if(!q) return;
+
+  const btn = document.getElementById('btn');
+  const results = document.getElementById('results');
+  const status = document.getElementById('status');
+
+  btn.disabled = true;
+  status.textContent = `Mencari via ${API_BASE}...`;
+  results.innerHTML = '';
+
+  try{
+    const language = document.getElementById('language').value;
+    const topk = document.getElementById('topk').value;
+    const resp = await fetch(`${API_BASE}/search?q=${encodeURIComponent(q)}&top_k=${encodeURIComponent(topk)}&language=${encodeURIComponent(language)}`);
+    if(!resp.ok) throw new Error(`HTTP ${resp.status}`);
+    const data = await resp.json();
+    const items = data.results || [];
+
+    status.textContent = `Ditemukan ${items.length} hasil untuk: "${data.query}"`;
+
+    if(items.length === 0){
+      results.innerHTML = '<div class="empty">Tidak ada hasil yang cocok.</div>';
+      return;
+    }
+
+    results.innerHTML = items.map((item, idx) => {
+      const p = item.payload || {};
+      const pageStart = p.page_start ?? '?';
+      const pageEnd = p.page_end ?? '?';
+      const pageLabel = pageStart === pageEnd ? `${pageStart}` : `${pageStart}–${pageEnd}`;
+      const sourceLink = `/books/${encodeURIComponent(p.book_id || '')}/pages/${encodeURIComponent(pageStart)}`;
+      return `
+        <article class="result">
+          <div class="result-head">
+            <div>
+              <div class="title">${idx + 1}. ${escapeHtml(p.title || 'Tanpa judul')}</div>
+              <div class="meta">
+                ${escapeHtml(p.book_id || '-') } · halaman ${escapeHtml(String(pageLabel))} · file ${escapeHtml(p.filename || '-')}
+              </div>
+            </div>
+            <div class="score">score ${Number(item.score ?? 0).toFixed(4)}</div>
+          </div>
+          <div class="snippet">${formatSnippet(item.text || '', q)}</div>
+          <div class="meta" style="margin-top:10px">
+            <a href="${sourceLink}" target="_blank" rel="noreferrer">Buka halaman sumber</a>
+          </div>
+        </article>
+      `;
+    }).join('');
+  }catch(e){
+    status.textContent = `Gagal mencari: ${e.message}`;
+    results.innerHTML = '<div class="empty">Terjadi error saat mengambil hasil search.</div>';
+  }finally{
+    btn.disabled = false;
+  }
+}
+
+document.getElementById('query').addEventListener('keydown', (e) => {
+  if (e.key === 'Enter' && (e.ctrlKey || e.metaKey)) {
+    searchBooks();
+  }
+});
+
+fetch(`${API_BASE}/health`)
+  .then(resp => resp.ok ? resp.json() : Promise.reject(new Error(`HTTP ${resp.status}`)))
+  .then(() => {
+    document.getElementById('status').textContent = `Siap mencari. API aktif di ${API_BASE}.`;
+  })
+  .catch(() => {
+    document.getElementById('status').textContent = `API belum terjangkau di ${API_BASE}. Pastikan server berjalan.`;
+  });
+</script>
+</body>
+</html>

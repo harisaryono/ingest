@@ -1,0 +1,6 @@
+json_output/
+qdrant_db/
+__pycache__/
+*.pyc
+*.log
+*.bak
