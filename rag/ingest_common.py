@@ -31,8 +31,22 @@ def hash_text(text: str) -> str:
     return hashlib.sha256(text.encode("utf-8")).hexdigest()
 
 
-def point_id_for_hash(chunk_hash: str) -> str:
-    return str(uuid.uuid5(uuid.NAMESPACE_URL, f"rag-chunk:{chunk_hash}"))
+def chunk_identity_key(chunk: Dict) -> str:
+    metadata = chunk.get("metadata", {})
+    book_id = metadata.get("book_id", "")
+    page_start = metadata.get("page_start", "")
+    page_end = metadata.get("page_end", "")
+    chunk_idx = metadata.get("chunk_idx", "")
+    text = chunk.get("text", "")
+    return f"{book_id}|{page_start}|{page_end}|{chunk_idx}|{text}"
+
+
+def chunk_hash(chunk: Dict) -> str:
+    return hashlib.sha256(chunk_identity_key(chunk).encode("utf-8")).hexdigest()
+
+
+def point_id_for_hash(chunk_hash_value: str) -> str:
+    return str(uuid.uuid5(uuid.NAMESPACE_URL, f"rag-chunk:{chunk_hash_value}"))
 
 
 def _empty_state() -> Dict[str, Dict]:
@@ -252,7 +266,16 @@ def bootstrap_state_from_collection(client: QdrantClient) -> Dict[str, Dict]:
             payload = point.payload or {}
             book_id = payload.get("book_id") or payload.get("filename") or "unknown"
             text = payload.get("text", "")
-            chunk_hash = hash_text(text)
+            chunk_identity = {
+                "text": text,
+                "metadata": {
+                    "book_id": book_id,
+                    "page_start": payload.get("page_start", ""),
+                    "page_end": payload.get("page_end", ""),
+                    "chunk_idx": payload.get("chunk_idx", ""),
+                },
+            }
+            chunk_key = chunk_hash(chunk_identity)
             point_id = str(point.id)
 
             book_state = state["books"].setdefault(
@@ -266,18 +289,18 @@ def bootstrap_state_from_collection(client: QdrantClient) -> Dict[str, Dict]:
                     "updated_at": now,
                 },
             )
-            if chunk_hash not in book_state["chunk_hashes"]:
-                book_state["chunk_hashes"].append(chunk_hash)
+            if chunk_key not in book_state["chunk_hashes"]:
+                book_state["chunk_hashes"].append(chunk_key)
                 book_state["point_count"] = len(book_state["chunk_hashes"])
 
-            if chunk_hash not in state["chunks"]:
-                state["chunks"][chunk_hash] = {
+            if chunk_key not in state["chunks"]:
+                state["chunks"][chunk_key] = {
                     "point_id": point_id,
                     "ref_count": 1,
                     "first_seen_at": now,
                 }
             else:
-                state["chunks"][chunk_hash]["ref_count"] = int(state["chunks"][chunk_hash]["ref_count"]) + 1
+                state["chunks"][chunk_key]["ref_count"] = int(state["chunks"][chunk_key]["ref_count"]) + 1
                 duplicate_ids.append(point_id)
 
     if duplicate_ids:
@@ -290,11 +313,11 @@ def build_points(chunks: List[Dict], embeddings: List[List[float]]) -> List[Poin
     points: List[PointStruct] = []
     for chunk, vec in zip(chunks, embeddings):
         text = chunk["text"]
-        chunk_hash = hash_text(text)
+        chunk_hash_value = chunk_hash(chunk)
         metadata = chunk["metadata"]
         points.append(
             PointStruct(
-                id=point_id_for_hash(chunk_hash),
+                id=point_id_for_hash(chunk_hash_value),
                 vector=vec,
                 payload={"text": text, **metadata},
             )
@@ -303,4 +326,4 @@ def build_points(chunks: List[Dict], embeddings: List[List[float]]) -> List[Poin
 
 
 def chunk_hashes(chunks: List[Dict]) -> List[str]:
-    return [hash_text(chunk["text"]) for chunk in chunks]
+    return [chunk_hash(chunk) for chunk in chunks]

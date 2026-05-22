@@ -247,3 +247,4 @@ UI ini memang sengaja sederhana untuk fokus ke kualitas retrieval.
 - `../DATABASE/qdrant_db/` adalah state lokal vector store
 - keduanya tidak perlu dipush ke GitHub
 - perubahan yang dipush hanya kode, script, dan dokumentasi
+- dedupe chunk dibatasi per identitas buku/halaman/chunk agar sitasi tetap aman
