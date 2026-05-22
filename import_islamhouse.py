@@ -3,7 +3,8 @@
 
 This script scans a source directory, extracts text from supported formats,
 checks whether the extracted content already exists in the current JSON corpus,
-and writes only unique books into DATABASE_DIR/json_output.
+marks suspicious extractions as pending review, and writes only unique books
+into DATABASE_DIR/json_output.
 
 Supported inputs:
 - .txt
@@ -13,8 +14,8 @@ Supported inputs:
 - .pdf
 - .epub / .ibooks (ZIP-based XHTML extraction)
 
-Skipped inputs are reported to a JSONL duplicates file so the caller can audit
-what was already present in the corpus.
+Skipped inputs are reported to JSONL audit files so the caller can audit what
+was already present in the corpus or what failed quality checks.
 """
 
 from __future__ import annotations
@@ -50,6 +51,7 @@ DATABASE_DIR = Path(
 OUTPUT_DIR = DATABASE_DIR / "json_output"
 CONTENT_INDEX_PATH = OUTPUT_DIR / "_content_index.json"
 DUPLICATE_REPORT_PATH = OUTPUT_DIR / "_duplicates.jsonl"
+QUALITY_REPORT_PATH = OUTPUT_DIR / "_quality_issues.jsonl"
 INDEX_PATH = OUTPUT_DIR / "_index.json"
 
 SUPPORTED_EXTS = {
@@ -64,8 +66,16 @@ SUPPORTED_EXTS = {
 }
 
 ARABIC_DIACRITICS_RE = re.compile(r"[\u064b-\u065f\u0670\u06d6-\u06ed]")
+WORD_RE = re.compile(r"[A-Za-z0-9\u0600-\u06ff]+")
 LANG_PREFIX_RE = re.compile(r"^([a-z]{2})(?:[_-]|$)", re.IGNORECASE)
 PAGE_BREAK_RE = re.compile(r"\f+")
+ARABIC_RANGES = (
+    (0x0600, 0x06FF),
+    (0x0750, 0x077F),
+    (0x08A0, 0x08FF),
+    (0xFB50, 0xFDFF),
+    (0xFE70, 0xFEFF),
+)
 
 
 @dataclass
@@ -92,6 +102,73 @@ def sha256_file(path: Path) -> str:
         for chunk in iter(lambda: f.read(1024 * 1024), b""):
             digest.update(chunk)
     return digest.hexdigest()
+
+
+def is_arabic_char(ch: str) -> bool:
+    if not ch:
+        return False
+    codepoint = ord(ch)
+    return any(start <= codepoint <= end for start, end in ARABIC_RANGES)
+
+
+def detect_script(text: str) -> str:
+    arabic_chars = 0
+    latin_chars = 0
+    for ch in text:
+        if is_arabic_char(ch):
+            arabic_chars += 1
+        elif "LATIN" in unicodedata.name(ch, ""):
+            latin_chars += 1
+
+    if arabic_chars == 0 and latin_chars == 0:
+        return "unknown"
+    if arabic_chars >= max(20, latin_chars * 2):
+        return "arabic"
+    if latin_chars >= max(20, arabic_chars * 2):
+        return "latin"
+    return "mixed"
+
+
+def char_profile(text: str) -> Dict[str, int]:
+    profile = {
+        "total_chars": len(text),
+        "nonspace_chars": 0,
+        "letters": 0,
+        "arabic_chars": 0,
+        "latin_chars": 0,
+        "digits": 0,
+        "punct": 0,
+        "symbols": 0,
+        "other": 0,
+        "replacement": text.count("\ufffd"),
+    }
+
+    for ch in text:
+        if not ch.isspace():
+            profile["nonspace_chars"] += 1
+        category = unicodedata.category(ch)
+        if category.startswith("L"):
+            profile["letters"] += 1
+            if is_arabic_char(ch):
+                profile["arabic_chars"] += 1
+            elif "LATIN" in unicodedata.name(ch, ""):
+                profile["latin_chars"] += 1
+        elif category.startswith("N"):
+            profile["digits"] += 1
+        elif category.startswith("P"):
+            profile["punct"] += 1
+        elif category.startswith("S"):
+            profile["symbols"] += 1
+        else:
+            profile["other"] += 1
+
+    return profile
+
+
+def write_jsonl(path: Path, entry: Dict) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with path.open("a", encoding="utf-8") as f:
+        f.write(json.dumps(entry, ensure_ascii=False) + "\n")
 
 
 def simhash(tokens: Iterable[str]) -> int:
@@ -138,10 +215,14 @@ def resolve_index_json_path(record: Dict, json_dir: str) -> str:
     return os.path.join(json_dir, f"{filename}.json")
 
 
-def detect_language(filename: str) -> str:
-    match = LANG_PREFIX_RE.match(filename)
+def detect_language(source: Path | str) -> str:
+    path = source if isinstance(source, Path) else Path(str(source))
+    match = LANG_PREFIX_RE.match(path.name)
     if match:
         return match.group(1).lower()
+    for part in reversed(path.parts):
+        if part.lower() in {"ar", "en", "id", "ru"}:
+            return part.lower()
     return "unknown"
 
 
@@ -290,6 +371,95 @@ def read_doc_with_libreoffice(path: Path) -> List[str]:
         return pages or [html_text.strip()]
 
 
+def analyze_quality(pages: List[str], language: str, path: Path, extractor: str, size_bytes: int) -> Dict:
+    raw_pages = [page or "" for page in pages]
+    normalized_pages = [unicodedata.normalize("NFKC", html_lib.unescape(page)).replace("\x0c", " ").replace("\xa0", " ") for page in raw_pages]
+    joined = "\n".join(normalized_pages).strip()
+    profile = char_profile(joined)
+    tokens = WORD_RE.findall(normalize_text(joined, language))
+    unique_tokens = set(tokens)
+    page_lengths = [len(page.strip()) for page in raw_pages]
+    page_hashes = [sha256_text(normalize_text(page, language)) for page in raw_pages if normalize_text(page, language)]
+    page_hash_count = len(page_hashes)
+    duplicate_pages = max(0, page_hash_count - len(set(page_hashes)))
+
+    token_count = len(tokens)
+    unique_word_ratio = len(unique_tokens) / token_count if token_count else 0.0
+    avg_page_chars = sum(page_lengths) / max(len(page_lengths), 1)
+    short_page_ratio = sum(1 for length in page_lengths if length < 40) / max(len(page_lengths), 1)
+    duplicate_page_ratio = duplicate_pages / max(page_hash_count, 1)
+    symbol_ratio = (profile["punct"] + profile["symbols"]) / max(profile["letters"] + profile["digits"] + profile["punct"] + profile["symbols"], 1)
+    replacement_ratio = profile["replacement"] / max(profile["total_chars"], 1)
+    arabic_ratio = profile["arabic_chars"] / max(profile["letters"], 1)
+    latin_ratio = profile["latin_chars"] / max(profile["letters"], 1)
+    unique_char_ratio = len(set(joined)) / max(profile["nonspace_chars"], 1)
+    detected_script = detect_script(joined)
+    expected_language = detect_language(path)
+    expected_arabic = expected_language == "ar" or language == "ar" or any(part.lower() == "ar" for part in path.parts)
+
+    reasons: List[str] = []
+    warnings: List[str] = []
+
+    if profile["nonspace_chars"] < 40 or token_count < 8:
+        reasons.append("too_short_or_empty")
+    if profile["nonspace_chars"] >= 120 and unique_char_ratio < 0.04:
+        reasons.append("low_character_diversity")
+    if replacement_ratio >= 0.01:
+        reasons.append("encoding_replacement_chars")
+    if duplicate_page_ratio >= 0.67 and page_hash_count >= 3:
+        reasons.append("repeated_pages")
+
+    if expected_arabic:
+        if profile["arabic_chars"] == 0 and profile["latin_chars"] >= 20 and profile["nonspace_chars"] >= 40:
+            reasons.append("arabic_script_mismatch")
+        elif profile["arabic_chars"] < 10 and profile["nonspace_chars"] >= 60:
+            reasons.append("arabic_missing")
+        elif arabic_ratio < 0.12 and profile["nonspace_chars"] >= 200:
+            reasons.append("arabic_low_density")
+        elif detected_script == "latin" and profile["nonspace_chars"] >= 40:
+            reasons.append("arabic_script_mismatch")
+
+    if token_count >= 120 and unique_word_ratio < 0.18:
+        warnings.append("low_vocab_diversity")
+    if short_page_ratio >= 0.6 and len(page_lengths) >= 2:
+        warnings.append("many_short_pages")
+    if symbol_ratio >= 0.45 and profile["nonspace_chars"] >= 120:
+        warnings.append("high_symbol_density")
+    if not expected_arabic and profile["arabic_chars"] >= 20 and profile["latin_chars"] >= 20 and profile["nonspace_chars"] >= 300:
+        warnings.append("mixed_script_content")
+    if extractor in {"pdf", "libreoffice-html"} and size_bytes >= 1024 * 1024 and profile["nonspace_chars"] < 400:
+        reasons.append("conversion_loss_suspected")
+
+    status = "ok"
+    if reasons:
+        status = "quarantine"
+    elif warnings:
+        status = "warn"
+
+    return {
+        "status": status,
+        "reasons": reasons,
+        "warnings": warnings,
+        "expected_language": expected_language,
+        "expected_arabic": expected_arabic,
+        "detected_script": detected_script,
+        "metrics": {
+            **profile,
+            "page_count": len(raw_pages),
+            "token_count": token_count,
+            "unique_word_ratio": round(unique_word_ratio, 4),
+            "avg_page_chars": round(avg_page_chars, 2),
+            "short_page_ratio": round(short_page_ratio, 4),
+            "duplicate_page_ratio": round(duplicate_page_ratio, 4),
+            "symbol_ratio": round(symbol_ratio, 4),
+            "replacement_ratio": round(replacement_ratio, 4),
+            "arabic_ratio": round(arabic_ratio, 4),
+            "latin_ratio": round(latin_ratio, 4),
+            "unique_char_ratio": round(unique_char_ratio, 4),
+        },
+    }
+
+
 def extract_pages(path: Path) -> Tuple[List[str], str]:
     ext = path.suffix.lower()
     if ext == ".txt":
@@ -367,6 +537,14 @@ def build_content_catalog(index_records: List[Dict], output_dir: Path) -> List[D
                 "json_path": record["json_path"],
                 "language": record.get("language", book.get("language", "unknown")),
                 "title": record.get("title", book.get("title", "")),
+                "quality_status": record.get("quality_status", book.get("quality_status", "ok")),
+                "review_status": record.get("review_status", book.get("review_status", "approved_auto")),
+                "review_required": bool(record.get("review_required", book.get("review_required", False))),
+                "review_route": record.get("review_route", book.get("review_route", "auto")),
+                "reviewed_by": record.get("reviewed_by", book.get("reviewed_by", "")),
+                "reviewed_at": record.get("reviewed_at", book.get("reviewed_at", "")),
+                "review_note": record.get("review_note", book.get("review_note", "")),
+                "ingest_ready": bool(record.get("ingest_ready", book.get("ingest_ready", True))),
                 "total_pages": int(record.get("total_pages", len(book.get("pages", []))) or 0),
                 "size_bytes": int(record.get("size_bytes", book.get("size_bytes", 0)) or 0),
                 "content_hash": sig.content_hash,
@@ -476,10 +654,11 @@ def process_file(
     if not pages:
         return None, None, None, extractor
 
-    language = detect_language(path.name)
+    language = detect_language(path)
     signature = build_signature(pages, language, path.stat().st_size)
     outpath, relpath = make_output_path(source_label, input_dir, path)
     book_id = make_book_id(source_label, relpath)
+    quality = analyze_quality(pages, language, path, extractor, path.stat().st_size)
     duplicate_of, score, reason = find_duplicate(
         {
             "page_hashes": signature.page_hashes,
@@ -510,15 +689,43 @@ def process_file(
         "text_hash": signature.text_hash,
         "text_simhash": signature.text_simhash,
         "extractor": extractor,
+        "quality_status": quality["status"],
+        "quality_reasons": quality["reasons"],
+        "quality_warnings": quality["warnings"],
+        "quality_metrics": quality["metrics"],
+        "quality_expected_language": quality["expected_language"],
+        "quality_expected_arabic": quality["expected_arabic"],
+        "quality_detected_script": quality["detected_script"],
     }
 
-    if duplicate_of and not keep_duplicates:
-        return record, duplicate_of, {"score": score, "reason": reason}, extractor
+    if quality["status"] == "quarantine":
+        record.update(
+            {
+                "review_status": "pending_review",
+                "review_required": True,
+                "review_route": "manual_or_lease_coordinator",
+                "reviewed_by": "",
+                "reviewed_at": "",
+                "ingest_ready": False,
+            }
+        )
+    else:
+        record.update(
+            {
+                "review_status": "approved_auto",
+                "review_required": False,
+                "review_route": "auto",
+                "reviewed_by": "",
+                "reviewed_at": "",
+                "ingest_ready": True,
+            }
+        )
 
     book_json = {
         **record,
         "pages": [{"page": i + 1, "content": page} for i, page in enumerate(pages)],
     }
+
     return book_json, duplicate_of, {"score": score, "reason": reason}, extractor
 
 
@@ -547,6 +754,12 @@ def update_content_index(entries: List[Dict], record: Dict, signature: BookSigna
         "source_path": record["source_path"],
         "source_relpath": record["source_relpath"],
         "source_hash": record["source_hash"],
+        "quality_status": record.get("quality_status", "ok"),
+        "quality_reasons": record.get("quality_reasons", []),
+        "quality_warnings": record.get("quality_warnings", []),
+        "review_status": record.get("review_status", "approved_auto"),
+        "review_required": bool(record.get("review_required", False)),
+        "review_route": record.get("review_route", "auto"),
         "content_hash": signature.content_hash,
         "text_hash": signature.text_hash,
         "text_simhash": signature.text_simhash,
@@ -570,6 +783,7 @@ def main() -> None:
     parser.add_argument("--source-label", default="islamhouse", help="output subdirectory and book_id prefix")
     parser.add_argument("--recursive", action="store_true", help="scan source directory recursively")
     parser.add_argument("--keep-duplicates", action="store_true", help="write duplicate books instead of skipping them")
+    parser.add_argument("--keep-suspect", action="store_true", help="legacy flag; suspect books are still written but remain pending review")
     parser.add_argument("--duplicate-threshold", type=float, default=0.92, help="page overlap threshold for duplicate detection")
     parser.add_argument("--limit", type=int, default=0, help="process at most N files for testing")
     args = parser.parse_args()
@@ -596,8 +810,10 @@ def main() -> None:
     processed = 0
     imported = 0
     skipped_duplicates = 0
+    quarantined = 0
     unsupported = 0
     duplicate_hits = 0
+    quality_warned = 0
 
     for i, path in enumerate(files, 1):
         processed += 1
@@ -620,6 +836,32 @@ def main() -> None:
             log(f"[{i:04d}] SKIP   {path.name} (empty after extraction)")
             continue
 
+        if book_json.get("quality_status") == "quarantine":
+            quarantined += 1
+            report_entry = {
+                "kind": "quality",
+                **book_json,
+                "quality_status": book_json.get("quality_status"),
+                "quality_reasons": book_json.get("quality_reasons", []),
+                "quality_warnings": book_json.get("quality_warnings", []),
+                "quality_metrics": book_json.get("quality_metrics", {}),
+                "expected_language": book_json.get("quality_expected_language"),
+                "expected_arabic": book_json.get("quality_expected_arabic"),
+                "detected_script": book_json.get("quality_detected_script"),
+            }
+            write_jsonl(QUALITY_REPORT_PATH, report_entry)
+            log(
+                f"[{i:04d}] QC     {path.name} "
+                f"status={book_json.get('quality_status')} review={book_json.get('review_status')} "
+                f"reasons={','.join(book_json.get('quality_reasons', [])) or '-'}"
+            )
+        elif book_json.get("quality_status") == "warn":
+            quality_warned += 1
+            log(
+                f"[{i:04d}] WARN   {path.name} "
+                f"reasons={','.join(book_json.get('quality_warnings', [])) or '-'}"
+            )
+
         if duplicate_of and not args.keep_duplicates:
             skipped_duplicates += 1
             duplicate_hits += 1
@@ -634,6 +876,10 @@ def main() -> None:
                 "language": book_json["language"],
                 "title": book_json["title"],
                 "extractor": extractor,
+                "quality_status": book_json.get("quality_status", "ok"),
+                "quality_reasons": book_json.get("quality_reasons", []),
+                "review_status": book_json.get("review_status", "approved_auto"),
+                "review_required": bool(book_json.get("review_required", False)),
             }
             write_duplicate_report(DUPLICATE_REPORT_PATH, report_entry)
             log(
@@ -660,6 +906,16 @@ def main() -> None:
             "source_relpath": book_json["source_relpath"],
             "source_hash": book_json["source_hash"],
             "content_hash": book_json["content_hash"],
+            "quality_status": book_json.get("quality_status", "ok"),
+            "quality_reasons": book_json.get("quality_reasons", []),
+            "quality_warnings": book_json.get("quality_warnings", []),
+            "review_status": book_json.get("review_status", "approved_auto"),
+            "review_required": bool(book_json.get("review_required", False)),
+            "review_route": book_json.get("review_route", "auto"),
+            "reviewed_by": book_json.get("reviewed_by", ""),
+            "reviewed_at": book_json.get("reviewed_at", ""),
+            "review_note": book_json.get("review_note", ""),
+            "ingest_ready": bool(book_json.get("ingest_ready", True)),
         }
 
         update_index(index, index_record)
@@ -682,6 +938,8 @@ def main() -> None:
     log("=== DONE ===")
     log(f"Processed          : {processed}")
     log(f"Imported unique    : {imported}")
+    log(f"Quality quarantined : {quarantined}")
+    log(f"Quality warnings    : {quality_warned}")
     log(f"Skipped duplicates  : {skipped_duplicates}")
     log(f"Unsupported/empty   : {unsupported}")
     log(f"Duplicate matches   : {duplicate_hits}")

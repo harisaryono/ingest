@@ -34,6 +34,7 @@ Tujuan sistem:
 │   ├── ingest.py
 │   ├── ingest_common.py
 │   ├── ingest_id.py
+│   ├── review_book.py
 │   ├── retriever.py
 │   ├── run_api.sh
 │   ├── run_ingest.sh
@@ -45,7 +46,7 @@ Catatan:
 - `../DATABASE/json_output/` dan `../DATABASE/qdrant_db/` sengaja tidak dipush ke git
 - file kerja yang dipush adalah kode, script, dan dokumentasi
 - `rag/run_api.sh` adalah launcher lokal untuk menyajikan UI search di `http://127.0.0.1:8000`
-- `import_islamhouse.py` menambahkan korpus Islamhouse ke `json_output/` sambil mengecek duplikasi konten terhadap JSON yang sudah ada
+- `import_islamhouse.py` menambahkan korpus Islamhouse ke `json_output/` sambil mengecek duplikasi konten dan kualitas ekstraksi terhadap JSON yang sudah ada
 
 ## Arsitektur Runtime
 
@@ -251,7 +252,8 @@ UI ini memang sengaja sederhana untuk fokus ke kualitas retrieval.
 - `../DATABASE/json_output/` adalah sumber data yang dipakai ingest
 - `../DATABASE/qdrant_db/` adalah state lokal vector store
 - `rag/rebuild_qdrant.py` membuat backup ke `../DATABASE/backups/` sebelum rebuild
-- `import_islamhouse.py` menulis manifest dedupe ke `../DATABASE/json_output/_duplicates.jsonl` dan content catalog ke `../DATABASE/json_output/_content_index.json`
+- `import_islamhouse.py` menulis manifest dedupe ke `../DATABASE/json_output/_duplicates.jsonl`, quality report ke `../DATABASE/json_output/_quality_issues.jsonl`, dan content catalog ke `../DATABASE/json_output/_content_index.json`
+- item yang belum lolos review ditandai `pending_review` dan tidak masuk ingest sampai di-approve manual atau lewat `rag/review_book.py`
 - keduanya tidak perlu dipush ke GitHub
 - perubahan yang dipush hanya kode, script, dan dokumentasi
 - dedupe chunk dibatasi per identitas buku/halaman/chunk agar sitasi tetap aman

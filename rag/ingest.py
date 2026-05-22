@@ -45,6 +45,16 @@ def parse_languages() -> List[str]:
     return langs or ["id"]
 
 
+def is_ingest_approved(book_info: dict) -> bool:
+    review_status = str(book_info.get("review_status", "approved_auto") or "approved_auto").strip().lower()
+    return review_status in {
+        "approved",
+        "approved_auto",
+        "approved_manual",
+        "approved_lease",
+    }
+
+
 def main() -> None:
     selected_languages = parse_languages()
     log("=" * 50)
@@ -104,6 +114,13 @@ def main() -> None:
         book_id = book_info.get("book_id") or os.path.splitext(filename)[0]
         json_path = resolve_index_json_path(book_info, JSON_DIR)
         book_start = time.time()
+
+        if not is_ingest_approved(book_info):
+            log(
+                f"[{idx:03d}/{total_files}] SKIP   review pending {filename} "
+                f"status={book_info.get('review_status', 'approved_auto')}"
+            )
+            continue
 
         if not os.path.exists(json_path):
             log(f"[{idx:03d}/{total_files}] SKIP   missing source {json_path}")
