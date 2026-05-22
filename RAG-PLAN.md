@@ -1,371 +1,246 @@
-# Rencana RAG — Buku Islam JSON → Q&A dengan Referensi
+# RAG Plan - Buku Islam JSON to Search/Q&A
 
 ## Ringkasan
 
-Membangun sistem RAG (Retrieval-Augmented Generation) di atas 315 buku Islam (~7068 halaman, 42MB JSON) yang sudah dikonversi.   
-User bertanya dalam bahasa Indonesia, sistem menjawab ringkas **hanya dari referensi** dengan sumber buku + halaman.
+Repo ini sekarang berisi pipeline RAG lokal untuk koleksi buku Islam yang sudah dikonversi ke JSON.
 
----
+Status data saat ini:
+- `315` buku
+- `7068` halaman total
+- sekitar `36.4 MB` data JSON sumber
+- bahasa terindeks: `id`, `en`, dan `ru`
 
-## Arsitektur
+Tujuan sistem:
+- user mencari atau bertanya dalam bahasa Indonesia
+- sistem menampilkan cuplikan relevan dan, bila perlu, jawaban ringkas berbasis referensi
+- hasil harus bisa ditelusuri ke buku dan halaman sumber
+
+## Layout Repo
 
 ```
-[User] → FastAPI → Retriever (ChromaDB where language=X → top-20 → rerank → top-5) → Context → Generator → Answer + Sources
-                          ↕                                                                    ↕
-                   Vector Store (ChromaDB)                                             ┌──────────────────┐
-                          ↕                                                           │  Mode: local      │ → qwen3:4b (Ollama)
-                  Embedding: nomic-embed-text via Ollama                              │  Mode: large/auto  │ → Lease Coordinator
-                                                                                      └──────────────────┘
+./
+├── convert_to_json.py
+├── json_output/              # runtime data hasil konversi, di-ignore git
+├── qdrant_db/                # runtime data vector store lokal, di-ignore git
+├── rag/
+│   ├── api.py
+│   ├── chunker.py
+│   ├── config.py
+│   ├── dedupe_qdrant_storage.py
+│   ├── embeddings.py
+│   ├── generator.py
+│   ├── ingest.py
+│   ├── ingest_common.py
+│   ├── ingest_id.py
+│   ├── retriever.py
+│   ├── run_ingest.sh
+│   └── static/index.html
+└── RAG-PLAN.md
 ```
 
----
+Catatan:
+- `json_output/` dan `qdrant_db/` sengaja tidak dipush ke git
+- file kerja yang dipush adalah kode, script, dan dokumentasi
+
+## Arsitektur Runtime
+
+```
+[User] -> FastAPI -> Retriever -> Context -> Generator -> Answer/Sources
+                     ↘ /search langsung menampilkan cuplikan
+```
+
+Komponen runtime:
+- Embedding: `nomic-embed-text` via Ollama
+- Vector store: Qdrant lokal dengan path repo-relative
+- Generator lokal: `qwen3:4b` via Ollama
+- Generator besar: Lease Coordinator untuk model `gpt-oss-120b`
+- Frontend: HTML + vanilla JS
 
 ## Keputusan Arsitektural
 
-| Komponen | Pilihan | Alasan |
-|----------|---------|--------|
-| Embedding | `nomic-embed-text` via Ollama | gratis, multilingual, ringan (~274MB) |
-| Vector Store | ChromaDB | persistent, zero-config, Python native |
-| Reranker | Sederhana (skor + keyword + bonus judul) | sampai budget untuk reranker model |
-| LLM Generator — **local** | `qwen3:4b` via Ollama | sudah terinstall, support Indonesia, untuk query ringan |
-| LLM Generator — **large** | Model besar via **Lease Coordinator** | kualitas tinggi untuk pertanyaan serius/agama; API key dikelola lease coordinator |
-| Mode Generator | **Strict RAG** — hanya rangkum konteks | cegah halusinasi, tidak pakai pengetahuan model |
-| API Backend | FastAPI | user sudah familiar |
-| Frontend | HTML form sederhana dulu (`static/index.html`) | fokus ke kualitas retrieval dulu |
-| Filter Bahasa | **Default `id`**, opsi `all` | via parameter request |
+| Komponen | Pilihan saat ini | Catatan |
+|----------|------------------|---------|
+| Embedding | `nomic-embed-text` via Ollama | dipakai untuk dokumen dan query |
+| Vector store | Qdrant lokal | disimpan di `./qdrant_db` |
+| Retrieval | Dense retrieval + rerank ringan | ada query expansion untuk kata kunci penting |
+| Generator lokal | `qwen3:4b` via Ollama | fallback cepat |
+| Generator besar | Lease Coordinator | untuk pertanyaan yang butuh kualitas lebih tinggi |
+| API backend | FastAPI | endpoint `/search`, `/ask`, `/books`, `/stats`, `/health` |
+| UI | Search-only page | fokus ke hasil pencarian dan cuplikan |
+| Bahasa | Default `id`, opsi `all` | metadata bahasa dipakai untuk filter |
 
----
+## Konfigurasi Inti
 
-## Langkah Implementasi
+File konfigurasi: [`rag/config.py`](/media/harry/DATA120B/GIT/INGEST/rag/config.py)
 
-### 1. Persiapan Environment
-
-```bash
-python3 -m venv ~/venv/rag-buku
-source ~/venv/rag-buku/bin/activate
-pip install chromadb fastapi uvicorn requests numpy
-```
-
-Pull embedding model:
-```bash
-ollama pull nomic-embed-text   # ~274MB
-```
-
-### 2. Konfigurasi (`config.py`)
+Konstanta yang dipakai sekarang:
 
 ```python
 OLLAMA_BASE = "http://localhost:11434"
 EMBED_MODEL = "nomic-embed-text"
 LLM_MODEL = "qwen3:4b"
 
-# Lease Coordinator (mode large/auto)
-GENERATION_BACKEND = "auto"     # "ollama" | "lease" | "auto"
+GENERATION_BACKEND = "auto"
 LEASE_COORDINATOR_URL = "http://127.0.0.1:9000/chat/completions"
 LEASE_MODEL = "gpt-oss-120b"
 
-CHROMA_PATH = "./chroma_db"
+QDRANT_PATH = "<repo>/qdrant_db"
+INGEST_STATE_PATH = "<repo>/qdrant_db/ingest_state.json"
+JSON_DIR = "<repo>/json_output"
 COLLECTION_NAME = "buku_islam"
-JSON_DIR = "./json_output"
+VECTOR_DIM = 768
+
 DEFAULT_TOP_K = 5
 RETRIEVAL_CANDIDATES = 20
-CHUNK_MAX_CHARS = 2000
-CHUNK_OVERLAP = 100
-CHUNK_MIN_CHARS = 100
+RETRIEVAL_CANDIDATES_PER_QUERY = 12
+
+CHUNK_MAX_CHARS = 500
+CHUNK_OVERLAP = 50
+CHUNK_MIN_CHARS = 80
+
+EMBED_BATCH_SIZE = 64
+INGEST_BATCH_SIZE = 128
+EMBED_RETRY_COUNT = 3
+EMBED_TIMEOUT = 60
 ```
 
-### 3. Chunker (`chunker.py`)
+## Chunking
 
-Input: file JSON buku → output: list chunk.
+File: [`rag/chunker.py`](/media/harry/DATA120B/GIT/INGEST/rag/chunker.py)
 
-**Strategi chunking:**
-1. Tiap page jadi calon chunk
-2. Page > `CHUNK_MAX_CHARS` (2000) chars → split dengan overlap `CHUNK_OVERLAP` (100)
-3. Page < `CHUNK_MIN_CHARS` (100) chars:
-   - Jika berupa cover/daftar isi/noise → **skip**
-   - Jika berupa judul bab (pendek, all caps, atau didahului angka romawi) → **prepend** ke page sesudahnya
-   - Jika bukan judul bab → **append** ke page sebelumnya
-4. Skip page yang hanya berisi metadata/cover (deteksi: judul saja, daftar isi HYPERLINK, dll.)
+Strategi yang dipakai:
+- page dijadikan kandidat chunk
+- page yang terlalu panjang dipecah dengan overlap
+- page pendek yang noise di-skip
+- metadata buku dan halaman dibawa ke tiap chunk
 
-**Metadata per chunk:**
+Metadata chunk yang disimpan:
+
 ```python
 {
-    "book_id": "id-tata-cara-praktis-wudu",    # ID stabil untuk URL/filter
+    "book_id": "id-tata-cara-praktis-wudu",
     "filename": "id-tata-cara-praktis-wudu.txt",
     "title": "Tata Cara Praktis Wudhu",
     "language": "id",
     "page_start": 3,
-    "page_end": 4,    # atau 5 jika merge beberapa page
+    "page_end": 4,
     "chunk_idx": 0
 }
 ```
 
-`book_id` = stem filename tanpa ekstensi. Lebih stabil dari filename, dipakai untuk URL dan filter per buku.
+## Embedding
 
-Contoh referensi output:
-- 1 halaman: `[Nama Buku, hlm. 5]`
-- Merge: `[Nama Buku, hlm. 3–4]`
+File: [`rag/embeddings.py`](/media/harry/DATA120B/GIT/INGEST/rag/embeddings.py)
 
-### 4. Embedding (`embeddings.py`)
+Fungsi utama:
+- `embed_texts(texts)`
+- `embed_query(query)`
 
-Fungsi `embed_texts(texts: list[str]) → list[list[float]]`:
+Implementasi memakai Ollama embed API:
 
-```python
-POST http://localhost:11434/api/embed
-Body: {"model": "nomic-embed-text", "input": texts}
+```http
+POST /api/embed
+{"model": "nomic-embed-text", "input": [...]}
 ```
 
-Support batch embedding untuk efisiensi.
+## Ingestion
 
-### 5. Ingestion Pipeline (`ingest.py`)
+File: [`rag/ingest.py`](/media/harry/DATA120B/GIT/INGEST/rag/ingest.py)
 
-1. Load `_index.json` → daftar semua file
-2. Untuk setiap buku:
-   - Baca JSON book → chunking via `chunker.py`
-   - Embed chunks via `embeddings.py`
-   - Upsert ke ChromaDB:
-     - `documents` = teks chunk
-     - `metadatas` = `{book_id, filename, title, language, page_start, page_end, chunk_idx}`
-     - `ids` = `{book_id}_p{page_start:04d}_c{chunk_idx:03d}`
-       (Pakai `book_id` bukan filename — hindari karakter aneh/spasi/slash)
-3. Simpan ChromaDB persistent di `./chroma_db/`
+Perilaku ingest saat ini:
+- membaca JSON dari `json_output/`
+- chunking per buku
+- embedding batch
+- upsert ke Qdrant lokal
+- state disimpan di `qdrant_db/ingest_state.json`
+- ingest bersifat idempotent
+- rerun tidak menambah data ganda untuk chunk yang sama
+- jika file berubah, data lama untuk buku itu dibersihkan lalu diinsert ulang
+- progress disimpan per batch agar proses bisa resume
 
-### 6. Retrieval + Rerank (`retriever.py`)
+Komponen bantu:
+- [`rag/ingest_common.py`](/media/harry/DATA120B/GIT/INGEST/rag/ingest_common.py)
+- [`rag/ingest_id.py`](/media/harry/DATA120B/GIT/INGEST/rag/ingest_id.py)
+- [`rag/dedupe_qdrant_storage.py`](/media/harry/DATA120B/GIT/INGEST/rag/dedupe_qdrant_storage.py)
 
-Fungsi `retrieve(query, top_k=5, language="id")`:
+## Retrieval
 
-```
-1. Embed query → Ollama nomic-embed-text
-2. ChromaDB similarity search dengan filter metadata:
-   if language != "all":
-     where = {"language": language}
-   ambil RETRIEVAL_CANDIDATES (20) candidates
-3. Rerank sederhana:
-   - Base: normalize_score(chromadb_score)
-     ChromaDB bisa mengembalikan "distance" atau "similarity".
-     Fungsi aman: base = 1 / (1 + d) jika d adalah distance; langsung pakai jika sudah similarity.
-   - +0.15 jika judul buku mengandung salah satu keyword query
-   - -0.10 jika chunk < 50 chars (terlalu pendek)
-   - -0.05 jika chunk mengandung HYPERLINK (noise)
-4. Sort by final score → ambil top_k
-5. Return: [{text, score, metadata}]
-```
+File: [`rag/retriever.py`](/media/harry/DATA120B/GIT/INGEST/rag/retriever.py)
 
-Tambahan: `normalize_score()` memastikan semakin tinggi = semakin relevan.
+Retrieval sekarang bukan ChromaDB. Yang dipakai:
+- Qdrant local client
+- query embedding
+- beberapa query variant untuk expansion
+- rerank ringan berbasis:
+  - kecocokan judul
+  - cakupan konsep query
+  - penalti untuk chunk terlalu pendek
+  - penalti noise
 
-### 7. Generator (`generator.py`)
+Alur:
+1. embed query
+2. ambil kandidat dari Qdrant
+3. rerank hasil
+4. return top-k
 
-Fungsi `generate(query, context_chunks, strict=True, mode="auto")`:
+Endpoint `/search` memakai retrieval ini tanpa LLM, sehingga aman untuk tampilkan cuplikan.
 
-**Arsitektur dua tingkat:**
+## Generator
 
-```
-generate() → pilih backend:
-  "local"  → generate_local()  → Ollama qwen3:4b
-  "large"  → generate_remote() → Lease Coordinator (model besar)
-  "auto"   → pilih otomatis berdasarkan query (lihat logika di bawah)
-```
+File: [`rag/generator.py`](/media/harry/DATA120B/GIT/INGEST/rag/generator.py)
 
-**Abstraksi backend:**
+Mode yang tersedia:
+- `local` -> Ollama `qwen3:4b`
+- `large` -> Lease Coordinator
+- `auto` -> pilih otomatis
+- `search_only` -> tampilkan raw chunks tanpa generasi jawaban
 
-```python
-def generate(query, context_chunks, strict=True, mode="auto"):
-    prompt = build_prompt(query, context_chunks, strict)
+Mode `strict` membatasi jawaban hanya dari referensi yang diambil dari retrieval.
 
-    if mode == "auto":
-        mode = select_mode(query, strict)
+## API
 
-    if mode == "local":
-        return generate_local(prompt)
-    elif mode == "large":
-        return generate_remote(prompt, LEASE_MODEL)
-    elif mode == "search_only":
-        return format_chunks_only(context_chunks)  # tanpa LLM
-```
+File: [`rag/api.py`](/media/harry/DATA120B/GIT/INGEST/rag/api.py)
 
-**Logika `auto`:**
+Endpoint yang aktif:
 
-```text
-Jika mode="search_only" →
-  tampilkan raw chunks, tanpa LLM
+| Endpoint | Method | Fungsi |
+|----------|--------|--------|
+| `/health` | GET | cek service + Qdrant |
+| `/stats` | GET | jumlah buku, halaman, point, bahasa |
+| `/search` | GET | search chunk + skor + payload |
+| `/ask` | POST | retrieval + generasi jawaban |
+| `/books` | GET | daftar buku |
+| `/books/{book_id}` | GET | metadata buku |
+| `/books/{book_id}/pages/{page_num}` | GET | isi halaman tertentu |
+| `/debug/retrieve` | POST | raw retrieval untuk debugging |
 
-Jika query pendek (< 50 chars) DAN top_k <= 5 DAN strict=false →
-  pakai local (qwen3:4b)
+Static site dimount di root sehingga [`rag/static/index.html`](/media/harry/DATA120B/GIT/INGEST/rag/static/index.html) bisa dibuka langsung dari server FastAPI.
 
-Jika strict=true DAN query mengandung kata kunci hukum/hadis/khilaf/akidah →
-  pakai lease coordinator (model besar)
+## Frontend
 
-Jika local gagal (timeout/error) →
-  fallback ke lease coordinator
+File: [`rag/static/index.html`](/media/harry/DATA120B/GIT/INGEST/rag/static/index.html)
 
-Jika lease coordinator gagal →
-  fallback ke local
-```
+UI saat ini:
+- search-only
+- input query
+- pilihan bahasa
+- pilihan top-k
+- daftar hasil berisi score, title, book_id, halaman, filename, dan cuplikan
 
-**Fungsi `generate_local(prompt)`:**
+UI ini memang sengaja sederhana untuk fokus ke kualitas retrieval.
 
-```python
-POST http://localhost:11434/api/generate
-Body: {"model": "qwen3:4b", "prompt": prompt, "stream": false}
-```
+## Tahap Kerja
 
-**Fungsi `generate_remote(prompt, model)`:**
+1. Ingest data JSON ke Qdrant lokal
+2. Pastikan rerun aman dan tidak duplikatif
+3. Evaluasi kualitas retrieval dengan query nyata
+4. Tambah tuning query expansion dan rerank bila perlu
+5. Pakai `/ask` bila ingin jawaban generatif berbasis referensi
+6. Pertahankan `json_output/` dan `qdrant_db/` sebagai runtime data lokal di luar git
 
-Kirim ke Lease Coordinator sebagai OpenAI-compatible chat completion:
+## Catatan Operasional
 
-```python
-POST {LEASE_COORDINATOR_URL}  # e.g. http://127.0.0.1:9000/chat/completions
-Body: {
-    "model": LEASE_MODEL,         # "gpt-oss-120b"
-    "messages": [
-        {"role": "user", "content": prompt}
-    ],
-    "temperature": 0.1
-}
-```
-
-Lease coordinator yang memilih provider, API key, dan menangani TTL/fencing/retry.  
-Aplikasi RAG tidak menyimpan API key sama sekali.
-
-**Prompt (strict):**
-
-```
-Anda adalah asisten RAG. Jawaban wajib hanya berdasarkan INFORMASI REFERENSI di bawah.
-
-ATURAN WAJIB:
-1. Jangan memakai pengetahuan di luar referensi.
-2. Jangan menambah ayat, hadis, nama ulama, atau hukum jika tidak muncul dalam referensi.
-3. Jangan menyimpulkan status hukum seperti wajib, sunnah, haram, makruh, bid'ah, sah, atau batal kecuali istilah itu disebut jelas dalam referensi.
-4. Jika referensi tidak cukup menjawab, jawab:
-   "Tidak ditemukan secara cukup dalam buku referensi."
-5. Jawab ringkas maksimal 3 paragraf.
-6. Setelah setiap poin penting, cantumkan rujukan: [Nama Buku, hlm. X–Y].
-7. Jika ada perbedaan antar referensi, sebutkan perbedaannya secara netral.
-
-INFORMASI REFERENSI:
-[Buku: {title}, Halaman {page_start}–{page_end}]
-{chunk_text}
-
-[Buku: {title}, Halaman {page_start}–{page_end}]
-{chunk_text}
-...
-
-PERTANYAAN: {query}
-
-JAWABAN:
-```
-
-Jika `strict=False` (untuk eksplorasi), prompt dilembutkan sedikit tapi tetap wajib referensi.
-
-### 8. API (`api.py`)
-
-FastAPI endpoints:
-
-| Endpoint | Method | Parameter | Response |
-|----------|--------|-----------|----------|
-| `/ask` | POST | `{"query", "top_k":5, "language":"id", "strict":true, "mode":"auto"}` | `{answer, sources, backend_used, mode}` |
-| `/search` | GET | `?q=&top_k=5&language=id` | `{results: [{text, score, metadata}]}` — **mode aman tanpa LLM**, untuk pertanyaan sensitif |
-| `/books` | GET | - | daftar semua buku dari index |
-| `/books/{book_id}` | GET | - | metadata + halaman buku |
-| `/books/{book_id}/pages/{n}` | GET | - | konten halaman spesifik |
-| `/debug/retrieve` | POST | `{"query", "top_k":5, "language":"id"}` | raw chunks + skor (debug retrieval) |
-| `/stats` | GET | - | `{total_books, total_pages, total_chunks, languages}` |
-| `/health` | GET | - | status service + ChromaDB + Lease Coordinator |
-
-**Parameter `mode` pada `/ask`:**
-
-```text
-"local"       → paksa qwen3:4b lokal
-"large"       → paksa lease coordinator (model besar)
-"auto"        → sistem memilih (default)
-"search_only" → tanpa LLM, tampilkan raw chunks
-```
-
-### 9. Frontend (`static/index.html`)
-
-HTML satu halaman dengan vanilla JS:
-- Form input: textbox pertanyaan + dropdown language (id/all) + checkbox strict
-- Tombol "Tanya"
-- Output area: jawaban + daftar sumber (buku, halaman) yang bisa diklik → buka `/books/{book_id}/pages/{n}`
-- Bagian debug: toggle untuk lihat raw chunks retrieval
-
----
-
-## Alur Query Contoh
-
-**Request:**
-```json
-{
-  "query": "tata cara wudhu",
-  "top_k": 5,
-  "language": "id",
-  "strict": true,
-  "mode": "auto"
-}
-```
-
-**Proses:**
-1. Embed query → ChromaDB cari top-20 dengan `where={"language": "id"}`
-2. Rerank (normalize_score + bonus judul + penalty noise) → top-5
-3. Prompt ke Qwen3:4b → generate jawaban
-4. Parse output → answer + sources
-
-**Response:**
-```json
-{
-  "answer": "Tata cara wudhu: 1) Niat, 2) Membasuh muka, 3) Membasuh tangan sampai siku, 4) Mengusap kepala, 5) Membasuh kaki sampai mata kaki. [Tata Cara Praktis Wudhu, hlm. 1–2] Disunnahkan berkumur dan istinsyaq. [Ringkasan Tata Cara Salat, hlm. 3]",
-  "backend_used": "ollama",
-  "mode": "local",
-  "sources": [
-    {"title": "Tata Cara Praktis Wudhu", "page_start": 1, "page_end": 2, "book_id": "id-tata-cara-praktis-wudu", "filename": "id-tata-cara-praktis-wudu.txt"},
-    {"title": "Ringkasan Tata Cara Salat", "page_start": 3, "page_end": 3, "book_id": "id-ringkasan-tata-cara-salat", "filename": "id-ringkasan-tata-cara-salat.txt"}
-  ]
-}
-```
-
----
-
-## Struktur Direktori Final
-
-```
-./
-├── json_output/              # hasil konversi sebelumnya (done)
-│   ├── _index.json
-│   ├── _covers/
-│   └── _empty/
-├── qdrant_db/                # database vektor lokal Qdrant
-├── rag/
-│   ├── config.py             # konstanta & konfigurasi
-│   ├── chunker.py            # page → chunk + metadata
-│   ├── embeddings.py         # Ollama embed API wrapper
-│   ├── ingest.py             # indexing pipeline
-│   ├── retriever.py          # search + rerank
-│   ├── generator.py          # prompt builder + LLM call
-│   ├── api.py                # FastAPI server
-│   ├── static/
-│   │   └── index.html        # frontend sederhana
-│   └── README.md             # dokumentasi RAG
-├── convert_to_json.py        # converter sebelumnya (done)
-└── README.md
-```
-
----
-
-## Catatan & Pertimbangan
-
-- **Anti-halusinasi**: prompt strict, filter chunk pendek/noise, rerank dengan penalty
-- **Multi-bahasa**: embedding nomic-embed-text support EN/ID/AR, filter language via metadata
-- **Debug-first**: endpoint `/debug/retrieve` untuk troubleshooting retrieval sebelum LLM
-- **Scaling**: ~7000 chunks, embed sekali ~5-10 menit, retrieval <100ms
-- **Upgrade path**: chunker.py → ganti chunk strategy; embeddings.py → ganti ke model lain; retriever.py → tambah reranker sungguhan; generator.py → ganti LLM ke API eksternal atau tambah provider di Lease Coordinator
-- **Update buku**: jalankan `ingest.py` ulang (ChromaDB upsert berdasarkan ID)
-- **Keamanan API key**: API key model besar tidak disimpan di aplikasi RAG; seluruh manajemen key, TTL, fencing, retry, dan rotasi provider ditangani Lease Coordinator
-- **Fallback**: jika lease coordinator gagal/tidak terjangkau, generator otomatis fallback ke Ollama lokal; jika Ollama lokal gagal, fallback ke lease coordinator
-
----
-
-## Tahap Pengembangan
-
-1. **Tahap 1** (prioritas): `config.py` + `chunker.py` + `embeddings.py` + `ingest.py` → indexing berhasil
-2. **Tahap 2**: `retriever.py` + `generator.py` → RAG pipeline selesai, test via CLI
-3. **Tahap 3**: `api.py` + `static/index.html` → web interface
-4. **Tahap 4** (jika perlu): evaluasi kualitas retrieval, tuning chunking & rerank
+- `json_output/` adalah sumber data yang dipakai ingest
+- `qdrant_db/` adalah state lokal vector store
+- keduanya tidak perlu dipush ke GitHub
+- perubahan yang dipush hanya kode, script, dan dokumentasi
