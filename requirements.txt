@@ -1,0 +1,8 @@
+beautifulsoup4
+fastapi
+lxml
+pdfminer.six
+python-docx
+qdrant-client
+requests
+uvicorn

@@ -96,11 +96,33 @@ def stats():
     except Exception:
         point_count = 0
 
+    review_counts = {}
+    ingest_ready_books = 0
+    ingest_ready_pages = 0
+    pending_review_books = 0
+    rejected_books = 0
+    for record in idx["files"]:
+        review_status = str(record.get("review_status", "approved_auto") or "approved_auto")
+        review_counts[review_status] = review_counts.get(review_status, 0) + 1
+        pages = int(record.get("total_pages", 0) or 0)
+        if bool(record.get("ingest_ready", True)):
+            ingest_ready_books += 1
+            ingest_ready_pages += pages
+        if review_status == "pending_review":
+            pending_review_books += 1
+        elif review_status == "rejected":
+            rejected_books += 1
+
     return {
         "total_books": idx["total_files"],
+        "ingest_ready_books": ingest_ready_books,
+        "pending_review_books": pending_review_books,
+        "rejected_books": rejected_books,
         "total_pages": sum(r["total_pages"] for r in idx["files"]),
+        "ingest_ready_pages": ingest_ready_pages,
         "total_points_indexed": point_count,
         "languages": idx["languages"],
+        "review_status_counts": review_counts,
     }
 
 
@@ -151,9 +173,13 @@ def list_books():
         "book_id": r.get("book_id") or os.path.splitext(r["filename"])[0],
         "filename": r["filename"],
         "json_filename": os.path.basename(resolve_index_json_path(r, JSON_DIR)),
+        "json_path": r.get("json_path", ""),
         "title": r["title"],
         "language": r["language"],
         "total_pages": r["total_pages"],
+        "quality_status": r.get("quality_status", "ok"),
+        "review_status": r.get("review_status", "approved_auto"),
+        "ingest_ready": bool(r.get("ingest_ready", True)),
     } for r in _load_index()["files"]]
 
 
@@ -174,9 +200,13 @@ def book_detail(book_id: str):
         "book_id": record.get("book_id") or book_id,
         "filename": book["filename"],
         "json_filename": os.path.basename(json_path),
+        "json_path": record.get("json_path", ""),
         "title": book["title"],
         "language": book["language"],
         "total_pages": book["total_pages"],
+        "quality_status": book.get("quality_status", record.get("quality_status", "ok")),
+        "review_status": book.get("review_status", record.get("review_status", "approved_auto")),
+        "ingest_ready": bool(book.get("ingest_ready", record.get("ingest_ready", True))),
         "pages": [p["page"] for p in book["pages"]],
     }
 

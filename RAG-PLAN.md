@@ -19,6 +19,7 @@ Tujuan sistem:
 
 ```
 ./
+├── requirements.txt
 ├── convert_to_json.py
 ├── import_islamhouse.py
 ├── ../DATABASE/json_output/   # runtime data hasil konversi, di luar repo

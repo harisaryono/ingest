@@ -610,13 +610,19 @@ def find_duplicate(candidate: Dict, catalog: List[Dict], threshold: float) -> Tu
 
         page_score = page_overlap_score(list(candidate_set), list(existing_set))
         score = page_score
+        score_reason = "page_overlap"
         if simhash_distance is not None:
-            score = max(score, 1.0 - (simhash_distance / 64.0))
-        score = max(score, title_score)
+            simhash_score = 1.0 - (simhash_distance / 64.0)
+            if simhash_score > score:
+                score = simhash_score
+                score_reason = "text_similarity"
+        if score >= 0.80 and title_score >= 0.40:
+            score = min(1.0, score + min(0.08, title_score * 0.08))
+            score_reason = f"{score_reason}+title"
         if score > best_score:
             best = entry
             best_score = score
-            best_reason = "page_overlap" if score == page_score else "text_similarity"
+            best_reason = score_reason
 
     if best and best_score >= threshold:
         return best, best_score, best_reason
