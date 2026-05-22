@@ -199,7 +199,7 @@ def main() -> None:
 
                 log(
                     f"[{idx:03d}/{total_files}] BATCH  {batch_index + 1}/{total_batches} "
-                    f"new={len(new_chunks)} dup={len(batch_hashes) - len(new_chunks)}"
+                    f"new={len(new_chunks)} existing={len(batch_hashes) - len(new_chunks)}"
                 )
 
         except Exception as e:
