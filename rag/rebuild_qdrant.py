@@ -25,8 +25,10 @@ from config import DATABASE_DIR, QDRANT_PATH  # noqa: E402
 
 DATABASE_PATH = Path(DATABASE_DIR)
 REBUILD_STATE_PATH = DATABASE_PATH / "rebuild_qdrant_state.json"
+REBUILD_LOG_PATH = Path(os.getenv("RAG_REBUILD_LOG", str(DATABASE_PATH / "rebuild_qdrant.log")))
 BACKUP_ROOT = DATABASE_PATH / "backups"
 DEFAULT_VENV_PYTHON = Path("/home/harry/venv/rag-buku/bin/python")
+LOG_FH = None
 
 
 def utc_now() -> str:
@@ -35,6 +37,9 @@ def utc_now() -> str:
 
 def log(message: str) -> None:
     print(message, flush=True)
+    if LOG_FH is not None:
+        LOG_FH.write(message + "\n")
+        LOG_FH.flush()
 
 
 def load_rebuild_state() -> dict:
@@ -92,79 +97,103 @@ def run_ingest() -> int:
     env = os.environ.copy()
     env.setdefault("EMBED_BATCH_SIZE", "128")
     env.setdefault("EMBED_TIMEOUT", "120")
+    env["PYTHONUNBUFFERED"] = "1"
     env.pop("INGEST_SKIP_BOOTSTRAP", None)
     python_bin = choose_python()
     log(f"Using Python interpreter: {python_bin}")
-    proc = subprocess.run(
-        [python_bin, str(SCRIPT_DIR / "ingest.py")],
-        cwd=str(SCRIPT_DIR),
-        env=env,
-    )
+    with REBUILD_LOG_PATH.open("a", encoding="utf-8") as child_log:
+        child_log.write(f"\n=== ingest started {utc_now()} ===\n")
+        child_log.flush()
+        proc = subprocess.run(
+            [python_bin, "-u", str(SCRIPT_DIR / "ingest.py")],
+            cwd=str(SCRIPT_DIR),
+            env=env,
+            stdout=child_log,
+            stderr=subprocess.STDOUT,
+            text=True,
+            check=False,
+        )
+        child_log.write(f"=== ingest finished {utc_now()} rc={proc.returncode} ===\n")
+        child_log.flush()
     return proc.returncode
 
 
 def main() -> int:
-    parser = argparse.ArgumentParser(description="Rebuild the local Qdrant DB")
-    parser.add_argument(
-        "--force",
-        action="store_true",
-        help="archive the current qdrant_db again and restart from scratch",
-    )
-    args = parser.parse_args()
+    global LOG_FH
+    REBUILD_LOG_PATH.parent.mkdir(parents=True, exist_ok=True)
+    LOG_FH = REBUILD_LOG_PATH.open("a", encoding="utf-8")
+    LOG_FH.write(f"\n=== rebuild started {utc_now()} ===\n")
+    LOG_FH.flush()
+    code = 1
+    try:
+        parser = argparse.ArgumentParser(description="Rebuild the local Qdrant DB")
+        parser.add_argument(
+            "--force",
+            action="store_true",
+            help="archive the current qdrant_db again and restart from scratch",
+        )
+        args = parser.parse_args()
 
-    state = load_rebuild_state()
-    status = state.get("status", "")
+        state = load_rebuild_state()
+        status = state.get("status", "")
 
-    if status == "complete" and not args.force:
-        log(f"Rebuild already complete at {state.get('finished_at', 'unknown time')}")
-        return 0
+        if status == "complete" and not args.force:
+            log(f"Rebuild already complete at {state.get('finished_at', 'unknown time')}")
+            code = 0
+            return code
 
-    if args.force:
-        log("Force rebuild requested.")
-        archived = archive_existing_db()
-        state = {
-            "status": "prepared",
-            "backup_path": str(archived) if archived else "",
-            "prepared_at": utc_now(),
-            "updated_at": utc_now(),
-        }
-        save_rebuild_state(state)
-    elif status not in {"prepared", "ingesting", "failed"}:
-        archived = archive_existing_db()
-        state = {
-            "status": "prepared",
-            "backup_path": str(archived) if archived else "",
-            "prepared_at": utc_now(),
-            "updated_at": utc_now(),
-        }
-        save_rebuild_state(state)
-        if archived:
-            log(f"Archived existing Qdrant DB to {archived}")
+        if args.force:
+            log("Force rebuild requested.")
+            archived = archive_existing_db()
+            state = {
+                "status": "prepared",
+                "backup_path": str(archived) if archived else "",
+                "prepared_at": utc_now(),
+                "updated_at": utc_now(),
+            }
+            save_rebuild_state(state)
+        elif status not in {"prepared", "ingesting", "failed"}:
+            archived = archive_existing_db()
+            state = {
+                "status": "prepared",
+                "backup_path": str(archived) if archived else "",
+                "prepared_at": utc_now(),
+                "updated_at": utc_now(),
+            }
+            save_rebuild_state(state)
+            if archived:
+                log(f"Archived existing Qdrant DB to {archived}")
+            else:
+                log("No existing Qdrant DB found; starting fresh rebuild")
         else:
-            log("No existing Qdrant DB found; starting fresh rebuild")
-    else:
-        log(f"Resuming rebuild from status={status or 'unknown'}")
+            log(f"Resuming rebuild from status={status or 'unknown'}")
 
-    state["status"] = "ingesting"
-    state["started_at"] = state.get("started_at") or utc_now()
-    state["updated_at"] = utc_now()
-    save_rebuild_state(state)
-
-    log("Running ingest pipeline...")
-    code = run_ingest()
-    if code == 0:
-        state["status"] = "complete"
-        state["finished_at"] = utc_now()
+        state["status"] = "ingesting"
+        state["started_at"] = state.get("started_at") or utc_now()
         state["updated_at"] = utc_now()
         save_rebuild_state(state)
-        log("Rebuild complete.")
-    else:
-        state["status"] = "failed"
-        state["last_error_at"] = utc_now()
-        state["updated_at"] = utc_now()
-        save_rebuild_state(state)
-        log(f"Rebuild failed with exit code {code}.")
-    return code
+
+        log("Running ingest pipeline...")
+        code = run_ingest()
+        if code == 0:
+            state["status"] = "complete"
+            state["finished_at"] = utc_now()
+            state["updated_at"] = utc_now()
+            save_rebuild_state(state)
+            log("Rebuild complete.")
+        else:
+            state["status"] = "failed"
+            state["last_error_at"] = utc_now()
+            state["updated_at"] = utc_now()
+            save_rebuild_state(state)
+            log(f"Rebuild failed with exit code {code}.")
+        return code
+    finally:
+        if LOG_FH is not None:
+            LOG_FH.write(f"=== rebuild finished {utc_now()} rc={code} ===\n")
+            LOG_FH.flush()
+            LOG_FH.close()
+            LOG_FH = None
 
 
 if __name__ == "__main__":
