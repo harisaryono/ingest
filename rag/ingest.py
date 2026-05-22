@@ -39,6 +39,8 @@ def parse_languages() -> List[str]:
     raw = os.environ.get("INGEST_LANGUAGES", "id").strip()
     if not raw:
         return ["id"]
+    if raw.lower() in {"all", "*"}:
+        return []
     langs = [part.strip().lower() for part in raw.split(",") if part.strip()]
     return langs or ["id"]
 
@@ -46,14 +48,17 @@ def parse_languages() -> List[str]:
 def main() -> None:
     selected_languages = parse_languages()
     log("=" * 50)
-    log(f"RAG Ingestion - Qdrant ({', '.join(selected_languages)})")
+    lang_label = "all" if not selected_languages else ", ".join(selected_languages)
+    log(f"RAG Ingestion - Qdrant ({lang_label})")
     log("=" * 50)
 
     index_path = os.path.join(JSON_DIR, "_index.json")
     with open(index_path, "r", encoding="utf-8") as f:
         index_data = json.load(f)
 
-    files = [f for f in index_data["files"] if f["language"] in selected_languages]
+    files = index_data["files"]
+    if selected_languages:
+        files = [f for f in files if f["language"] in selected_languages]
     limit_env = os.environ.get("INGEST_LIMIT_BOOKS", "").strip()
     if limit_env:
         try:
