@@ -10,6 +10,7 @@ import os
 from config import JSON_DIR, QDRANT_PATH, COLLECTION_NAME
 from retriever import retrieve
 from generator import generate, extract_sources
+from ingest_common import resolve_index_json_path
 
 app = FastAPI(title="RAG Buku Islam", version="0.1.0")
 app.add_middleware(
@@ -36,7 +37,7 @@ def _book_entry(book_id: str) -> Dict | None:
 
 
 def _book_json_path(record: Dict) -> str:
-    return os.path.join(JSON_DIR, f"{record['filename']}.json")
+    return resolve_index_json_path(record, JSON_DIR)
 
 
 class AskRequest(BaseModel):
@@ -149,7 +150,7 @@ def list_books():
     return [{
         "book_id": os.path.splitext(r["filename"])[0],
         "filename": r["filename"],
-        "json_filename": f"{r['filename']}.json",
+        "json_filename": os.path.basename(resolve_index_json_path(r, JSON_DIR)),
         "title": r["title"],
         "language": r["language"],
         "total_pages": r["total_pages"],
@@ -172,7 +173,7 @@ def book_detail(book_id: str):
     return {
         "book_id": book_id,
         "filename": book["filename"],
-        "json_filename": f"{book['filename']}.json",
+        "json_filename": os.path.basename(json_path),
         "title": book["title"],
         "language": book["language"],
         "total_pages": book["total_pages"],

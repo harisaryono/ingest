@@ -27,6 +27,22 @@ def hash_file(path: str) -> str:
     return digest.hexdigest()
 
 
+def resolve_index_json_path(record: Dict, json_dir: str) -> str:
+    json_path = record.get("json_path", "")
+    if json_path:
+        if os.path.isabs(json_path):
+            return json_path
+        normalized = os.path.normpath(json_path)
+        prefix = f"json_output{os.sep}"
+        if normalized == "json_output":
+            return json_dir
+        if normalized.startswith(prefix):
+            normalized = normalized[len(prefix) :]
+        return os.path.join(json_dir, normalized)
+    filename = record.get("filename", "")
+    return os.path.join(json_dir, f"{filename}.json")
+
+
 def chunk_identity_key(chunk: Dict) -> str:
     metadata = chunk.get("metadata", {})
     book_id = metadata.get("book_id", "")

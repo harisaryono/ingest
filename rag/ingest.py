@@ -24,6 +24,7 @@ from ingest_common import (
     release_book,
     reset_book_state,
     resume_batch_index,
+    resolve_index_json_path,
     save_state,
     should_skip_book,
     commit_batch,
@@ -96,11 +97,11 @@ def main() -> None:
     for idx, book_info in enumerate(files, 1):
         filename = book_info["filename"]
         book_id = os.path.splitext(filename)[0]
-        json_path = os.path.join(JSON_DIR, f"{filename}.json")
+        json_path = resolve_index_json_path(book_info, JSON_DIR)
         book_start = time.time()
 
         if not os.path.exists(json_path):
-            log(f"[{idx:03d}/{total_files}] SKIP   {filename}")
+            log(f"[{idx:03d}/{total_files}] SKIP   missing source {json_path}")
             continue
 
         source_hash = hash_file(json_path)
