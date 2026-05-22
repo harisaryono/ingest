@@ -89,6 +89,7 @@ LEASE_MODEL = "gpt-oss-120b"
 QDRANT_PATH = "<repo>/../DATABASE/qdrant_db"
 INGEST_STATE_PATH = "<repo>/../DATABASE/qdrant_db/ingest_state.json"
 JSON_DIR = "<repo>/../DATABASE/json_output"
+DATABASE_DIR = "<repo>/../DATABASE"
 COLLECTION_NAME = "buku_islam"
 VECTOR_DIM = 768
 

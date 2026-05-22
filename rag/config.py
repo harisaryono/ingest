@@ -13,7 +13,12 @@ LEASE_MODEL = "gpt-oss-120b"
 
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 REPO_DIR = os.path.abspath(os.path.join(BASE_DIR, ".."))
-DATABASE_DIR = os.path.abspath(os.path.join(REPO_DIR, "..", "..", "DATABASE"))
+DATABASE_DIR = os.path.abspath(
+    os.getenv(
+        "DATABASE_DIR",
+        os.path.join(REPO_DIR, "..", "..", "DATABASE"),
+    )
+)
 QDRANT_PATH = os.path.join(DATABASE_DIR, "qdrant_db")
 INGEST_STATE_PATH = os.path.join(QDRANT_PATH, "ingest_state.json")
 COLLECTION_NAME = "buku_islam"

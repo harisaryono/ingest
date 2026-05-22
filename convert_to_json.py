@@ -4,7 +4,13 @@ import os
 from pathlib import Path
 
 INPUT_DIR = Path("/media/harry/DATA250/txt")
-OUTPUT_DIR = Path("/media/harry/DATA120B/DATABASE/json_output")
+DATABASE_DIR = Path(
+    os.getenv(
+        "DATABASE_DIR",
+        str(Path(__file__).resolve().parent.parent / "DATABASE"),
+    )
+)
+OUTPUT_DIR = DATABASE_DIR / "json_output"
 COVERS_DIR = OUTPUT_DIR / "_covers"
 EMPTY_DIR = OUTPUT_DIR / "_empty"
 

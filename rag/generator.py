@@ -134,9 +134,9 @@ def generate(
     context_chunks: List[Dict],
     strict: bool = True,
     mode: str = "auto",
-) -> Tuple[str, str, List[Dict], str]:
+) -> Tuple[str, str, str, List[Dict]]:
     if mode == "search_only":
-        return format_chunks_only(context_chunks), "search_only", context_chunks
+        return format_chunks_only(context_chunks), "search_only", "search_only", context_chunks
 
     if mode == "auto":
         mode = select_mode(query, strict)

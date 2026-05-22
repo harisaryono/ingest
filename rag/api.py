@@ -1,9 +1,9 @@
-from fastapi import FastAPI, Query
+from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
-from fastapi.responses import FileResponse, JSONResponse
+from fastapi.responses import JSONResponse
 from pydantic import BaseModel
-from typing import Optional, List, Dict
+from typing import List, Dict
 import json
 import os
 
@@ -19,6 +19,24 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
+
+
+def _load_index() -> Dict:
+    index_path = os.path.join(JSON_DIR, "_index.json")
+    with open(index_path, "r", encoding="utf-8") as f:
+        return json.load(f)
+
+
+def _book_entry(book_id: str) -> Dict | None:
+    for record in _load_index().get("files", []):
+        record_book_id = os.path.splitext(record["filename"])[0]
+        if record_book_id == book_id:
+            return record
+    return None
+
+
+def _book_json_path(record: Dict) -> str:
+    return os.path.join(JSON_DIR, f"{record['filename']}.json")
 
 
 class AskRequest(BaseModel):
@@ -68,10 +86,7 @@ def health():
 
 @app.get("/stats")
 def stats():
-    index_path = os.path.join(JSON_DIR, "_index.json")
-    with open(index_path, "r") as f:
-        idx = json.load(f)
-
+    idx = _load_index()
     from qdrant_client import QdrantClient
     try:
         c = QdrantClient(path=QDRANT_PATH)
@@ -96,7 +111,7 @@ def ask(req: AskRequest):
         language=req.language,
     )
 
-    answer, backend_used, mode_used, chunks = generate(
+    answer, backend_used, mode_used, _chunks = generate(
         query=req.query,
         context_chunks=context_chunks,
         strict=req.strict,
@@ -131,30 +146,33 @@ def search(q: str, top_k: int = 5, language: str = "id"):
 
 @app.get("/books")
 def list_books():
-    index_path = os.path.join(JSON_DIR, "_index.json")
-    with open(index_path, "r") as f:
-        idx = json.load(f)
     return [{
         "book_id": os.path.splitext(r["filename"])[0],
         "filename": r["filename"],
+        "json_filename": f"{r['filename']}.json",
         "title": r["title"],
         "language": r["language"],
         "total_pages": r["total_pages"],
-    } for r in idx["files"]]
+    } for r in _load_index()["files"]]
 
 
 @app.get("/books/{book_id}")
 def book_detail(book_id: str):
-    json_path = os.path.join(JSON_DIR, f"{book_id}.json")
+    record = _book_entry(book_id)
+    if not record:
+        return JSONResponse({"error": "not found"}, status_code=404)
+
+    json_path = _book_json_path(record)
     if not os.path.exists(json_path):
         return JSONResponse({"error": "not found"}, status_code=404)
 
-    with open(json_path, "r") as f:
+    with open(json_path, "r", encoding="utf-8") as f:
         book = json.load(f)
 
     return {
         "book_id": book_id,
         "filename": book["filename"],
+        "json_filename": f"{book['filename']}.json",
         "title": book["title"],
         "language": book["language"],
         "total_pages": book["total_pages"],
@@ -164,11 +182,15 @@ def book_detail(book_id: str):
 
 @app.get("/books/{book_id}/pages/{page_num}")
 def page_content(book_id: str, page_num: int):
-    json_path = os.path.join(JSON_DIR, f"{book_id}.json")
+    record = _book_entry(book_id)
+    if not record:
+        return JSONResponse({"error": "not found"}, status_code=404)
+
+    json_path = _book_json_path(record)
     if not os.path.exists(json_path):
         return JSONResponse({"error": "not found"}, status_code=404)
 
-    with open(json_path, "r") as f:
+    with open(json_path, "r", encoding="utf-8") as f:
         book = json.load(f)
 
     for p in book["pages"]:
