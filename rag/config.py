@@ -10,12 +10,13 @@ LEASE_MODEL = "gpt-oss-120b"
 
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 REPO_DIR = os.path.abspath(os.path.join(BASE_DIR, ".."))
-QDRANT_PATH = os.path.join(REPO_DIR, "qdrant_db")
+DATABASE_DIR = os.path.abspath(os.path.join(REPO_DIR, "..", "..", "DATABASE"))
+QDRANT_PATH = os.path.join(DATABASE_DIR, "qdrant_db")
 INGEST_STATE_PATH = os.path.join(QDRANT_PATH, "ingest_state.json")
 COLLECTION_NAME = "buku_islam"
 VECTOR_DIM = 768
 
-JSON_DIR = os.path.join(REPO_DIR, "json_output")
+JSON_DIR = os.path.join(DATABASE_DIR, "json_output")
 
 DEFAULT_TOP_K = 5
 RETRIEVAL_CANDIDATES = 20

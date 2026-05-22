@@ -20,8 +20,8 @@ Tujuan sistem:
 ```
 ./
 ├── convert_to_json.py
-├── json_output/              # runtime data hasil konversi, di-ignore git
-├── qdrant_db/                # runtime data vector store lokal, di-ignore git
+├── ../DATABASE/json_output/   # runtime data hasil konversi, di luar repo
+├── ../DATABASE/qdrant_db/     # runtime data vector store lokal, di luar repo
 ├── rag/
 │   ├── api.py
 │   ├── chunker.py
@@ -39,7 +39,7 @@ Tujuan sistem:
 ```
 
 Catatan:
-- `json_output/` dan `qdrant_db/` sengaja tidak dipush ke git
+- `../DATABASE/json_output/` dan `../DATABASE/qdrant_db/` sengaja tidak dipush ke git
 - file kerja yang dipush adalah kode, script, dan dokumentasi
 
 ## Arsitektur Runtime
@@ -61,7 +61,7 @@ Komponen runtime:
 | Komponen | Pilihan saat ini | Catatan |
 |----------|------------------|---------|
 | Embedding | `nomic-embed-text` via Ollama | dipakai untuk dokumen dan query |
-| Vector store | Qdrant lokal | disimpan di `./qdrant_db` |
+| Vector store | Qdrant lokal | disimpan di `../DATABASE/qdrant_db` |
 | Retrieval | Dense retrieval + rerank ringan | ada query expansion untuk kata kunci penting |
 | Generator lokal | `qwen3:4b` via Ollama | fallback cepat |
 | Generator besar | Lease Coordinator | untuk pertanyaan yang butuh kualitas lebih tinggi |
@@ -84,9 +84,9 @@ GENERATION_BACKEND = "auto"
 LEASE_COORDINATOR_URL = "http://127.0.0.1:9000/chat/completions"
 LEASE_MODEL = "gpt-oss-120b"
 
-QDRANT_PATH = "<repo>/qdrant_db"
-INGEST_STATE_PATH = "<repo>/qdrant_db/ingest_state.json"
-JSON_DIR = "<repo>/json_output"
+QDRANT_PATH = "<repo>/../DATABASE/qdrant_db"
+INGEST_STATE_PATH = "<repo>/../DATABASE/qdrant_db/ingest_state.json"
+JSON_DIR = "<repo>/../DATABASE/json_output"
 COLLECTION_NAME = "buku_islam"
 VECTOR_DIM = 768
 
@@ -148,11 +148,11 @@ POST /api/embed
 File: [`rag/ingest.py`](/media/harry/DATA120B/GIT/INGEST/rag/ingest.py)
 
 Perilaku ingest saat ini:
-- membaca JSON dari `json_output/`
+- membaca JSON dari `../DATABASE/json_output/`
 - chunking per buku
 - embedding batch
 - upsert ke Qdrant lokal
-- state disimpan di `qdrant_db/ingest_state.json`
+- state disimpan di `../DATABASE/qdrant_db/ingest_state.json`
 - ingest bersifat idempotent
 - rerun tidak menambah data ganda untuk chunk yang sama
 - jika file berubah, data lama untuk buku itu dibersihkan lalu diinsert ulang
@@ -236,11 +236,11 @@ UI ini memang sengaja sederhana untuk fokus ke kualitas retrieval.
 3. Evaluasi kualitas retrieval dengan query nyata
 4. Tambah tuning query expansion dan rerank bila perlu
 5. Pakai `/ask` bila ingin jawaban generatif berbasis referensi
-6. Pertahankan `json_output/` dan `qdrant_db/` sebagai runtime data lokal di luar git
+6. Pertahankan `../DATABASE/json_output/` dan `../DATABASE/qdrant_db/` sebagai runtime data lokal di luar git
 
 ## Catatan Operasional
 
-- `json_output/` adalah sumber data yang dipakai ingest
-- `qdrant_db/` adalah state lokal vector store
+- `../DATABASE/json_output/` adalah sumber data yang dipakai ingest
+- `../DATABASE/qdrant_db/` adalah state lokal vector store
 - keduanya tidak perlu dipush ke GitHub
 - perubahan yang dipush hanya kode, script, dan dokumentasi
