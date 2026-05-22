@@ -30,12 +30,21 @@ def normalize(text: str) -> str:
 
 def load_queries(path: Path) -> List[Dict]:
     queries: List[Dict] = []
-    with path.open("r", encoding="utf-8") as f:
-        for line in f:
-            line = line.strip()
-            if not line or line.startswith("#"):
-                continue
-            queries.append(json.loads(line))
+    paths: List[Path]
+    if path.is_dir():
+        paths = sorted(p for p in path.glob("*.jsonl") if p.is_file())
+    else:
+        paths = [path]
+
+    for file_path in paths:
+        with file_path.open("r", encoding="utf-8") as f:
+            for line in f:
+                line = line.strip()
+                if not line or line.startswith("#"):
+                    continue
+                item = json.loads(line)
+                item["_source_file"] = str(file_path)
+                queries.append(item)
     return queries
 
 
@@ -59,11 +68,7 @@ def fetch_results_via_api(api_base: str, query: str, top_k: int, language: str) 
     payload = response.json()
     results = []
     for item in payload.get("results", []):
-        results.append({
-            "text": item.get("text", ""),
-            "score": item.get("score", 0.0),
-            "payload": item.get("payload", {}),
-        })
+        results.append(dict(item))
     return results
 
 
@@ -93,10 +98,14 @@ def is_relevant(result: Dict, query_spec: Dict) -> bool:
 class QueryResult:
     query: str
     language: str
+    relevant_at_1: bool
+    relevant_at_3: bool
     relevant_at_5: bool
     relevant_at_10: bool
+    first_relevant_rank: int
     top_title: str
     top_score: float
+    top_score_components: Dict
     concept_coverage: float
     matched_terms: List[str]
     expected_titles: List[str]
@@ -134,6 +143,8 @@ def main() -> None:
 
     per_query: List[QueryResult] = []
     fail_details: List[Dict] = []
+    per_query_path = output_dir / f"eval-{datetime.now(timezone.utc).strftime('%Y%m%dT%H%M%SZ')}.jsonl"
+    per_query_lines: List[str] = []
 
     for spec in specs:
         query = str(spec.get("query", "")).strip()
@@ -153,16 +164,30 @@ def main() -> None:
                 f"Unable to reach API at {args.api_base}. Start `bash rag/run_api.sh` "
                 f"or rerun with `--backend direct`. Details: {exc}"
             ) from exc
+        top_1 = results[:1]
+        top_3 = results[:3]
         top_5 = results[:5]
+        top_10 = results[:10]
 
+        hit_1 = any(is_relevant(result, spec) for result in top_1)
+        hit_3 = any(is_relevant(result, spec) for result in top_3)
         hit_5 = any(is_relevant(result, spec) for result in top_5)
-        hit_10 = any(is_relevant(result, spec) for result in results[:10])
+        hit_10 = any(is_relevant(result, spec) for result in top_10)
+
+        first_relevant_rank = 0
+        for rank, result in enumerate(top_10, 1):
+            if is_relevant(result, spec):
+                first_relevant_rank = rank
+                break
+
         top_result = results[0] if results else {}
         top_title = result_title(top_result)
         top_score = float(top_result.get("score", 0.0) or 0.0)
+        top_score_components = top_result.get("score_components", {})
 
         if must_have:
-            matched_terms = [term for term in must_have if normalize(term) in normalize(top_title + " " + result_text(top_result))]
+            top_haystack = normalize(top_title + " " + result_text(top_result))
+            matched_terms = [term for term in must_have if normalize(term) in top_haystack]
             concept_coverage = len(matched_terms) / len(must_have)
         else:
             matched_terms = []
@@ -171,16 +196,21 @@ def main() -> None:
         qr = QueryResult(
             query=query,
             language=language,
+            relevant_at_1=hit_1,
+            relevant_at_3=hit_3,
             relevant_at_5=hit_5,
             relevant_at_10=hit_10,
+            first_relevant_rank=first_relevant_rank,
             top_title=top_title,
             top_score=round(top_score, 4),
+            top_score_components=top_score_components,
             concept_coverage=round(concept_coverage, 4),
             matched_terms=matched_terms,
             expected_titles=expected_titles,
             must_have=must_have,
         )
         per_query.append(qr)
+        per_query_lines.append(json.dumps(asdict(qr), ensure_ascii=False))
 
         if not hit_10:
             fail_details.append({
@@ -188,6 +218,7 @@ def main() -> None:
                 "language": language,
                 "top_title": top_title,
                 "top_score": round(top_score, 4),
+                "top_score_components": top_score_components,
                 "must_have": must_have,
                 "expected_titles": expected_titles,
                 "results": [
@@ -196,13 +227,18 @@ def main() -> None:
                         "score": round(float(r.get("score", 0.0) or 0.0), 4),
                         "book_id": r.get("payload", {}).get("book_id"),
                         "json_path": r.get("payload", {}).get("json_path"),
+                        "score_components": r.get("score_components", {}),
+                        "matched_concepts": r.get("matched_concepts", []),
                     }
-                    for r in results[:10]
+                    for r in top_10
                 ],
             })
 
+    recall_at_1 = sum(1 for item in per_query if item.relevant_at_1) / len(per_query)
+    recall_at_3 = sum(1 for item in per_query if item.relevant_at_3) / len(per_query)
     recall_at_5 = sum(1 for item in per_query if item.relevant_at_5) / len(per_query)
     recall_at_10 = sum(1 for item in per_query if item.relevant_at_10) / len(per_query)
+    mrr_at_10 = sum((1.0 / item.first_relevant_rank) if item.first_relevant_rank else 0.0 for item in per_query) / len(per_query)
     avg_concept_coverage = sum(item.concept_coverage for item in per_query) / len(per_query)
     failed_queries = len([item for item in per_query if not item.relevant_at_10])
 
@@ -210,26 +246,37 @@ def main() -> None:
         "timestamp": datetime.now(timezone.utc).isoformat(),
         "query_file": str(query_path),
         "total_queries": len(per_query),
+        "recall_at_1": round(recall_at_1, 4),
+        "recall_at_3": round(recall_at_3, 4),
         "recall_at_5": round(recall_at_5, 4),
         "recall_at_10": round(recall_at_10, 4),
+        "mrr_at_10": round(mrr_at_10, 4),
         "avg_concept_coverage": round(avg_concept_coverage, 4),
         "failed_queries": failed_queries,
         "queries": [asdict(item) for item in per_query],
         "fail_details": fail_details,
     }
 
-    report_path = output_dir / f"eval-{datetime.now(timezone.utc).strftime('%Y%m%dT%H%M%SZ')}.json"
+    report_stamp = datetime.now(timezone.utc).strftime('%Y%m%dT%H%M%SZ')
+    report_path = output_dir / f"eval-{report_stamp}.json"
     with report_path.open("w", encoding="utf-8") as f:
         json.dump(report, f, ensure_ascii=False, indent=2, sort_keys=True)
+    with per_query_path.open("w", encoding="utf-8") as f:
+        for line in per_query_lines:
+            f.write(line + "\n")
 
     print(f"Query file        : {query_path}")
     print(f"Backend           : {args.backend}")
     print(f"Total queries     : {len(per_query)}")
+    print(f"Recall@1          : {report['recall_at_1']:.4f}")
+    print(f"Recall@3          : {report['recall_at_3']:.4f}")
     print(f"Recall@5          : {report['recall_at_5']:.4f}")
     print(f"Recall@10         : {report['recall_at_10']:.4f}")
+    print(f"MRR@10            : {report['mrr_at_10']:.4f}")
     print(f"Avg concept cover : {report['avg_concept_coverage']:.4f}")
     print(f"Failed queries    : {failed_queries}")
     print(f"Report path       : {report_path}")
+    print(f"Details path      : {per_query_path}")
 
 
 if __name__ == "__main__":

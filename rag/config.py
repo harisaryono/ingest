@@ -21,6 +21,7 @@ DATABASE_DIR = os.path.abspath(
 )
 QDRANT_PATH = os.path.join(DATABASE_DIR, "qdrant_db")
 INGEST_STATE_PATH = os.path.join(QDRANT_PATH, "ingest_state.json")
+LEXICAL_INDEX_PATH = os.path.join(DATABASE_DIR, "lexical_index.pkl")
 COLLECTION_NAME = "buku_islam"
 VECTOR_DIM = 768
 

@@ -161,6 +161,9 @@ def search(q: str, top_k: int = 5, language: str = "id"):
                 "text": r["text"],
                 "score": r["score"],
                 "payload": r["payload"],
+                "score_components": r.get("score_components", {}),
+                "matched_concepts": r.get("matched_concepts", []),
+                "bm25_terms": r.get("bm25_terms", []),
             }
             for r in results
         ],
@@ -246,6 +249,9 @@ def debug_retrieve(req: RetrieveRequest):
                 "text": r["text"],
                 "score": r["score"],
                 "payload": r["payload"],
+                "score_components": r.get("score_components", {}),
+                "matched_concepts": r.get("matched_concepts", []),
+                "bm25_terms": r.get("bm25_terms", []),
             }
             for r in results
         ],

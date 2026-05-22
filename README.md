@@ -122,6 +122,16 @@ python3 rag/evaluate_retrieval.py --queries eval/queries.jsonl
 Report evaluasi akan ditulis ke:
 
 - `reports/eval-YYYYMMDDTHHMMSSZ.json`
+- `reports/eval-YYYYMMDDTHHMMSSZ.jsonl`
+
+Metrik utama yang dihitung:
+
+- `Recall@1`
+- `Recall@3`
+- `Recall@5`
+- `Recall@10`
+- `MRR@10`
+- `avg concept coverage`
 
 ## Endpoint API
 

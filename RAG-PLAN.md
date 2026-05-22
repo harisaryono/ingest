@@ -74,7 +74,7 @@ Komponen runtime:
 |----------|------------------|---------|
 | Embedding | `nomic-embed-text` via Ollama | dipakai untuk dokumen dan query |
 | Vector store | Qdrant lokal | disimpan di `../DATABASE/qdrant_db` |
-| Retrieval | Dense retrieval + rerank ringan | ada query expansion untuk kata kunci penting |
+| Retrieval | Dense + lexical/BM25 hybrid | ada query expansion, concept coverage, dan skor komponen transparan |
 | Generator lokal | `qwen3:4b` via Ollama | fallback cepat |
 | Generator besar | Lease Coordinator | untuk pertanyaan yang butuh kualitas lebih tinggi |
 | API backend | FastAPI | endpoint `/search`, `/ask`, `/books`, `/stats`, `/health` |
@@ -98,6 +98,7 @@ LEASE_MODEL = "gpt-oss-120b"
 
 QDRANT_PATH = "<repo>/../DATABASE/qdrant_db"
 INGEST_STATE_PATH = "<repo>/../DATABASE/qdrant_db/ingest_state.json"
+LEXICAL_INDEX_PATH = "<repo>/../DATABASE/lexical_index.pkl"
 JSON_DIR = "<repo>/../DATABASE/json_output"
 DATABASE_DIR = "<repo>/../DATABASE"
 COLLECTION_NAME = "buku_islam"
@@ -183,10 +184,13 @@ File: [`rag/retriever.py`](/media/harry/DATA120B/GIT/INGEST/rag/retriever.py)
 Retrieval sekarang bukan ChromaDB. Yang dipakai:
 - Qdrant local client
 - query embedding
+- lexical BM25 cache dari corpus JSON
 - beberapa query variant untuk expansion
-- rerank ringan berbasis:
-  - kecocokan judul
+- rerank berbasis skor komponen:
+  - dense score
+  - BM25 score
   - cakupan konsep query
+  - bonus judul
   - penalti untuk chunk terlalu pendek
   - penalti noise
 
@@ -225,7 +229,7 @@ Endpoint yang aktif:
 | `/books` | GET | daftar buku |
 | `/books/{book_id}` | GET | metadata buku |
 | `/books/{book_id}/pages/{page_num}` | GET | isi halaman tertentu |
-| `/debug/retrieve` | POST | raw retrieval untuk debugging |
+| `/debug/retrieve` | POST | raw retrieval untuk debugging + skor komponen |
 
 Static site dimount di root sehingga [`rag/static/index.html`](/media/harry/DATA120B/GIT/INGEST/rag/static/index.html) bisa dibuka langsung dari server FastAPI.
 
