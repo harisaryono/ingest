@@ -240,11 +240,13 @@ UI ini memang sengaja sederhana untuk fokus ke kualitas retrieval.
 4. Tambah tuning query expansion dan rerank bila perlu
 5. Pakai `/ask` bila ingin jawaban generatif berbasis referensi
 6. Pertahankan `../DATABASE/json_output/` dan `../DATABASE/qdrant_db/` sebagai runtime data lokal di luar git
+7. Gunakan `rag/rebuild_qdrant.py` untuk archive lama dan rebuild database dengan journal resumable
 
 ## Catatan Operasional
 
 - `../DATABASE/json_output/` adalah sumber data yang dipakai ingest
 - `../DATABASE/qdrant_db/` adalah state lokal vector store
+- `rag/rebuild_qdrant.py` membuat backup ke `../DATABASE/backups/` sebelum rebuild
 - keduanya tidak perlu dipush ke GitHub
 - perubahan yang dipush hanya kode, script, dan dokumentasi
 - dedupe chunk dibatasi per identitas buku/halaman/chunk agar sitasi tetap aman

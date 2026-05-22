@@ -27,10 +27,6 @@ def hash_file(path: str) -> str:
     return digest.hexdigest()
 
 
-def hash_text(text: str) -> str:
-    return hashlib.sha256(text.encode("utf-8")).hexdigest()
-
-
 def chunk_identity_key(chunk: Dict) -> str:
     metadata = chunk.get("metadata", {})
     book_id = metadata.get("book_id", "")
