@@ -82,6 +82,28 @@ def infer_document_type(record: Dict) -> str:
     return "html_document" if infer_source_type(record) == "html" else "book"
 
 
+def infer_conversion_status(record: Dict) -> str:
+    conversion_status = str(record.get("conversion_status", "") or "").strip().lower()
+    if conversion_status and conversion_status != "unknown":
+        return conversion_status
+
+    quality_status = str(record.get("quality_status", "") or "").strip().lower()
+    if quality_status == "quarantine":
+        return "failed"
+    if quality_status == "warn":
+        return "degraded"
+    if quality_status == "ok":
+        return "good"
+    document_type = infer_document_type(record)
+    if document_type == "empty":
+        return "failed"
+    if document_type in {"book", "html_document"}:
+        return "good"
+    if infer_source_type(record) != "unknown" or str(record.get("source_path", "") or record.get("filename", "") or "").strip():
+        return "good"
+    return "unknown"
+
+
 def chunk_identity_key(chunk: Dict) -> str:
     metadata = chunk.get("metadata", {})
     book_id = metadata.get("book_id", "")

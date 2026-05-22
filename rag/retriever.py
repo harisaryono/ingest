@@ -27,6 +27,7 @@ from config import (
 from chunker import chunk_book
 from ingest_common import (
     chunk_hash,
+    infer_conversion_status,
     infer_source_ext,
     infer_document_type,
     infer_source_type,
@@ -273,6 +274,7 @@ def _load_lexical_index() -> Optional[Dict]:
                 payload["source_ext"] = infer_source_ext(record)
                 payload["source_type"] = infer_source_type(record)
                 payload["document_type"] = infer_document_type(record)
+                payload["conversion_status"] = infer_conversion_status(record)
 
                 text = f"{payload.get('title', '')} {payload['text']}"
                 tokens = _tokenize(text)

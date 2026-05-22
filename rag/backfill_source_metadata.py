@@ -71,6 +71,27 @@ def document_type_from_record(record: Dict) -> str:
     return "html_document" if source_type_from_record(record) == "html" else "book"
 
 
+def conversion_status_from_record(record: Dict) -> str:
+    conversion_status = str(record.get("conversion_status", "") or "").strip().lower()
+    if conversion_status and conversion_status != "unknown":
+        return conversion_status
+    quality_status = str(record.get("quality_status", "") or "").strip().lower()
+    if quality_status == "quarantine":
+        return "failed"
+    if quality_status == "warn":
+        return "degraded"
+    if quality_status == "ok":
+        return "good"
+    document_type = document_type_from_record(record)
+    if document_type == "empty":
+        return "failed"
+    if document_type in {"book", "html_document"}:
+        return "good"
+    if source_type_from_record(record) != "unknown" or str(record.get("source_path", "") or record.get("filename", "") or "").strip():
+        return "good"
+    return "unknown"
+
+
 def build_record_lookup(index: Dict) -> Dict[str, Dict]:
     lookup = {}
     for record in index.get("files", []):
@@ -109,6 +130,7 @@ def update_book_json(json_path: Path, index_record: Dict) -> bool:
     set_if_missing("source_ext", source_ext_from_record(index_record))
     set_if_missing("source_type", source_type_from_record(index_record))
     set_if_missing("document_type", document_type_from_record(index_record))
+    set_if_missing("conversion_status", conversion_status_from_record(index_record))
     set_if_missing("review_status", index_record.get("review_status", payload.get("review_status", "approved_auto")))
     set_if_missing("review_required", bool(index_record.get("review_required", payload.get("review_required", False))))
     set_if_missing("review_route", index_record.get("review_route", payload.get("review_route", "auto")))
@@ -135,16 +157,20 @@ def update_index_records(index: Dict) -> Tuple[int, int]:
         record["source_ext"] = source_ext_from_record(record)
         record["source_type"] = source_type_from_record(record)
         record["document_type"] = document_type_from_record(record)
+        record["conversion_status"] = conversion_status_from_record(record)
         if record != before:
             changed += 1
 
     index["source_types"] = {}
     index["document_types"] = {}
+    index["conversion_status_counts"] = {}
     for record in files:
         st = source_type_from_record(record)
         dt = document_type_from_record(record)
+        cs = conversion_status_from_record(record)
         index["source_types"][st] = index["source_types"].get(st, 0) + 1
         index["document_types"][dt] = index["document_types"].get(dt, 0) + 1
+        index["conversion_status_counts"][cs] = index["conversion_status_counts"].get(cs, 0) + 1
 
     return changed, len(files)
 
@@ -162,6 +188,7 @@ def update_content_index(content_index: Dict, lookup: Dict[str, Dict]) -> int:
             "source_ext": source_ext_from_record(record),
             "source_type": source_type_from_record(record),
             "document_type": document_type_from_record(record),
+            "conversion_status": conversion_status_from_record(record),
         }
         for k, v in updates.items():
             if entry.get(k) != v:
@@ -187,6 +214,7 @@ def update_unindexed_empty_json(json_path: Path, output_dir: Path) -> bool:
         "source_ext": source_ext,
         "source_type": source_type,
         "document_type": "empty",
+        "conversion_status": "failed",
     }
 
     changed = False

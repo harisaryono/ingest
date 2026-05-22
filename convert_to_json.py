@@ -26,6 +26,10 @@ def source_type_from_suffix(suffix: str) -> str:
         return ext.lstrip(".")
     return "unknown"
 
+
+def conversion_status_from_result(result_type: str) -> str:
+    return "failed" if result_type == "empty" else "good"
+
 def detect_language(filename):
     if filename.startswith("en_") or filename.startswith("en-"):
         return "en"
@@ -97,6 +101,7 @@ def process_file(filepath):
             "source_ext": ext.lower(),
             "source_type": source_type,
             "document_type": "empty",
+            "conversion_status": conversion_status_from_result("empty"),
         }
 
     try:
@@ -123,6 +128,7 @@ def process_file(filepath):
         "source_ext": ext.lower(),
         "source_type": source_type,
         "document_type": "html_document" if source_type == "html" else "book",
+        "conversion_status": conversion_status_from_result("normal"),
         "pages": [
             {"page": i + 1, "content": p}
             for i, p in enumerate(pages_raw)
@@ -186,6 +192,7 @@ def main():
             "source_ext": result.get("source_ext", fpath.suffix.lower()),
             "source_type": result.get("source_type", source_type_from_suffix(fpath.suffix)),
             "document_type": result.get("document_type", "book"),
+            "conversion_status": result.get("conversion_status", "good"),
             "json_path": str(os.path.relpath(outpath, INPUT_DIR)),
         })
 
@@ -196,6 +203,7 @@ def main():
         "languages": {},
         "source_types": {},
         "document_types": {},
+        "conversion_status_counts": {},
         "files": index_records,
     }
     for r in index_records:
@@ -207,6 +215,8 @@ def main():
         index_data["source_types"][source_type] = index_data["source_types"].get(source_type, 0) + 1
         document_type = r.get("document_type", "book")
         index_data["document_types"][document_type] = index_data["document_types"].get(document_type, 0) + 1
+        conversion_status = r.get("conversion_status", "good")
+        index_data["conversion_status_counts"][conversion_status] = index_data["conversion_status_counts"].get(conversion_status, 0) + 1
 
     with open(index_path, "w", encoding="utf-8") as f:
         json.dump(index_data, f, indent=2, ensure_ascii=False)

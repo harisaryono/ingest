@@ -74,6 +74,17 @@ def source_type_from_path(path: Path) -> str:
         return ext.lstrip(".")
     return "unknown"
 
+
+def conversion_status_from_quality(quality_status: str) -> str:
+    quality_status = (quality_status or "").strip().lower()
+    if quality_status == "quarantine":
+        return "failed"
+    if quality_status == "warn":
+        return "degraded"
+    if quality_status == "ok":
+        return "good"
+    return "unknown"
+
 ARABIC_DIACRITICS_RE = re.compile(r"[\u064b-\u065f\u0670\u06d6-\u06ed]")
 WORD_RE = re.compile(r"[A-Za-z0-9\u0600-\u06ff]+")
 LANG_PREFIX_RE = re.compile(r"^([a-z]{2})(?:[_-]|$)", re.IGNORECASE)
@@ -546,6 +557,7 @@ def build_content_catalog(index_records: List[Dict], output_dir: Path) -> List[D
                 "json_path": record["json_path"],
                 "language": record.get("language", book.get("language", "unknown")),
                 "title": record.get("title", book.get("title", "")),
+                "conversion_status": record.get("conversion_status", book.get("conversion_status", "unknown")),
                 "quality_status": record.get("quality_status", book.get("quality_status", "ok")),
                 "review_status": record.get("review_status", book.get("review_status", "approved_auto")),
                 "review_required": bool(record.get("review_required", book.get("review_required", False))),
@@ -719,6 +731,7 @@ def process_file(
         "quality_expected_language": quality["expected_language"],
         "quality_expected_arabic": quality["expected_arabic"],
         "quality_detected_script": quality["detected_script"],
+        "conversion_status": conversion_status_from_quality(quality["status"]),
     }
 
     if quality["status"] == "quarantine":
@@ -762,6 +775,7 @@ def update_index(index: Dict, record: Dict) -> None:
     languages: Dict[str, int] = {}
     source_types: Dict[str, int] = {}
     document_types: Dict[str, int] = {}
+    conversion_status_counts: Dict[str, int] = {}
     for r in files:
         lang = r.get("language", "unknown")
         languages[lang] = languages.get(lang, 0) + 1
@@ -769,9 +783,12 @@ def update_index(index: Dict, record: Dict) -> None:
         source_types[source_type] = source_types.get(source_type, 0) + 1
         document_type = r.get("document_type", "book")
         document_types[document_type] = document_types.get(document_type, 0) + 1
+        conversion_status = r.get("conversion_status", "unknown")
+        conversion_status_counts[conversion_status] = conversion_status_counts.get(conversion_status, 0) + 1
     index["languages"] = languages
     index["source_types"] = source_types
     index["document_types"] = document_types
+    index["conversion_status_counts"] = conversion_status_counts
 
 
 def update_content_index(entries: List[Dict], record: Dict, signature: BookSignature) -> List[Dict]:
@@ -787,6 +804,7 @@ def update_content_index(entries: List[Dict], record: Dict, signature: BookSigna
         "source_ext": record.get("source_ext", ""),
         "source_type": record.get("source_type", "unknown"),
         "document_type": record.get("document_type", "book"),
+        "conversion_status": record.get("conversion_status", "unknown"),
         "source_hash": record["source_hash"],
         "quality_status": record.get("quality_status", "ok"),
         "quality_reasons": record.get("quality_reasons", []),
@@ -905,6 +923,7 @@ def main() -> None:
                 "source_ext": book_json.get("source_ext", ""),
                 "source_type": book_json.get("source_type", "unknown"),
                 "document_type": book_json.get("document_type", "book"),
+                "conversion_status": book_json.get("conversion_status", "unknown"),
                 "duplicate_of": duplicate_of.get("json_path"),
                 "duplicate_title": duplicate_of.get("title"),
                 "score": dup_info["score"] if dup_info else 0.0,
@@ -944,6 +963,7 @@ def main() -> None:
             "source_ext": book_json.get("source_ext", ""),
             "source_type": book_json.get("source_type", "unknown"),
             "document_type": book_json.get("document_type", "book"),
+            "conversion_status": book_json.get("conversion_status", "unknown"),
             "source_hash": book_json["source_hash"],
             "content_hash": book_json["content_hash"],
             "quality_status": book_json.get("quality_status", "ok"),

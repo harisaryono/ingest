@@ -10,7 +10,7 @@ import os
 from config import JSON_DIR, QDRANT_PATH, COLLECTION_NAME
 from retriever import retrieve
 from generator import generate, extract_sources
-from ingest_common import infer_document_type, infer_source_ext, infer_source_type, resolve_index_json_path
+from ingest_common import infer_conversion_status, infer_document_type, infer_source_ext, infer_source_type, resolve_index_json_path
 
 app = FastAPI(title="RAG Buku Islam", version="0.1.0")
 app.add_middleware(
@@ -99,6 +99,7 @@ def stats():
     review_counts = {}
     source_type_counts = {}
     document_type_counts = {}
+    conversion_status_counts = {}
     ingest_ready_books = 0
     ingest_ready_pages = 0
     pending_review_books = 0
@@ -110,6 +111,8 @@ def stats():
         source_type_counts[source_type] = source_type_counts.get(source_type, 0) + 1
         document_type = infer_document_type(record)
         document_type_counts[document_type] = document_type_counts.get(document_type, 0) + 1
+        conversion_status = infer_conversion_status(record)
+        conversion_status_counts[conversion_status] = conversion_status_counts.get(conversion_status, 0) + 1
         pages = int(record.get("total_pages", 0) or 0)
         if bool(record.get("ingest_ready", True)):
             ingest_ready_books += 1
@@ -131,6 +134,7 @@ def stats():
         "review_status_counts": review_counts,
         "source_type_counts": source_type_counts,
         "document_type_counts": document_type_counts,
+        "conversion_status_counts": conversion_status_counts,
     }
 
 
@@ -190,6 +194,7 @@ def list_books():
         "source_ext": infer_source_ext(r),
         "source_type": infer_source_type(r),
         "document_type": infer_document_type(r),
+        "conversion_status": infer_conversion_status(r),
         "title": r["title"],
         "language": r["language"],
         "total_pages": r["total_pages"],
@@ -222,6 +227,7 @@ def book_detail(book_id: str):
         "source_ext": infer_source_ext(record),
         "source_type": infer_source_type(record),
         "document_type": infer_document_type(record),
+        "conversion_status": infer_conversion_status(record),
         "title": book["title"],
         "language": book["language"],
         "total_pages": book["total_pages"],
