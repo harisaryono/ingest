@@ -25,7 +25,14 @@ from config import (
     JSON_DIR,
 )
 from chunker import chunk_book
-from ingest_common import chunk_hash, point_id_for_hash, resolve_index_json_path
+from ingest_common import (
+    chunk_hash,
+    infer_source_ext,
+    infer_document_type,
+    infer_source_type,
+    point_id_for_hash,
+    resolve_index_json_path,
+)
 
 
 EMBED_URL = f"{OLLAMA_BASE}/api/embed"
@@ -263,6 +270,9 @@ def _load_lexical_index() -> Optional[Dict]:
                 payload["source_path"] = record.get("source_path", "")
                 payload["source_hash"] = record.get("source_hash", "")
                 payload["source_relpath"] = record.get("source_relpath", "")
+                payload["source_ext"] = infer_source_ext(record)
+                payload["source_type"] = infer_source_type(record)
+                payload["document_type"] = infer_document_type(record)
 
                 text = f"{payload.get('title', '')} {payload['text']}"
                 tokens = _tokenize(text)

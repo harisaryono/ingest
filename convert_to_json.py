@@ -17,6 +17,15 @@ EMPTY_DIR = OUTPUT_DIR / "_empty"
 SKIP_DIRS = {"json_output", "_covers", "_empty"}
 SKIP_EXTENSIONS = {".py", ".sh", ".bat", ".exe"}
 
+
+def source_type_from_suffix(suffix: str) -> str:
+    ext = (suffix or "").lower()
+    if ext in {".htm", ".html"}:
+        return "html"
+    if ext:
+        return ext.lstrip(".")
+    return "unknown"
+
 def detect_language(filename):
     if filename.startswith("en_") or filename.startswith("en-"):
         return "en"
@@ -68,6 +77,9 @@ def process_file(filepath):
     filename = os.path.basename(filepath)
     stem, ext = os.path.splitext(filename)
     ext = ext or ""
+    source_path = str(Path(filepath).resolve())
+    source_relpath = os.path.relpath(filepath, INPUT_DIR)
+    source_type = source_type_from_suffix(ext)
 
     if not os.path.isfile(filepath):
         return None
@@ -80,6 +92,11 @@ def process_file(filepath):
             "filename": filename,
             "language": detect_language(filename),
             "title": clean_title(stem),
+            "source_path": source_path,
+            "source_relpath": source_relpath,
+            "source_ext": ext.lower(),
+            "source_type": source_type,
+            "document_type": "empty",
         }
 
     try:
@@ -101,6 +118,11 @@ def process_file(filepath):
         "title": clean_title(stem),
         "size_bytes": filesize,
         "total_pages": len(pages_raw),
+        "source_path": source_path,
+        "source_relpath": source_relpath,
+        "source_ext": ext.lower(),
+        "source_type": source_type,
+        "document_type": "html_document" if source_type == "html" else "book",
         "pages": [
             {"page": i + 1, "content": p}
             for i, p in enumerate(pages_raw)
@@ -159,6 +181,11 @@ def main():
             "title": result["title"],
             "total_pages": result["total_pages"],
             "size_bytes": result["size_bytes"],
+            "source_path": result.get("source_path", str(fpath.resolve())),
+            "source_relpath": result.get("source_relpath", os.path.relpath(fpath, INPUT_DIR)),
+            "source_ext": result.get("source_ext", fpath.suffix.lower()),
+            "source_type": result.get("source_type", source_type_from_suffix(fpath.suffix)),
+            "document_type": result.get("document_type", "book"),
             "json_path": str(os.path.relpath(outpath, INPUT_DIR)),
         })
 
@@ -167,6 +194,8 @@ def main():
     index_data = {
         "total_files": len(index_records),
         "languages": {},
+        "source_types": {},
+        "document_types": {},
         "files": index_records,
     }
     for r in index_records:
@@ -174,6 +203,10 @@ def main():
         if lang not in index_data["languages"]:
             index_data["languages"][lang] = 0
         index_data["languages"][lang] += 1
+        source_type = r.get("source_type", "unknown")
+        index_data["source_types"][source_type] = index_data["source_types"].get(source_type, 0) + 1
+        document_type = r.get("document_type", "book")
+        index_data["document_types"][document_type] = index_data["document_types"].get(document_type, 0) + 1
 
     with open(index_path, "w", encoding="utf-8") as f:
         json.dump(index_data, f, indent=2, ensure_ascii=False)

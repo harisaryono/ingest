@@ -65,6 +65,15 @@ SUPPORTED_EXTS = {
     ".ibooks",
 }
 
+
+def source_type_from_path(path: Path) -> str:
+    ext = path.suffix.lower()
+    if ext in {".htm", ".html"}:
+        return "html"
+    if ext:
+        return ext.lstrip(".")
+    return "unknown"
+
 ARABIC_DIACRITICS_RE = re.compile(r"[\u064b-\u065f\u0670\u06d6-\u06ed]")
 WORD_RE = re.compile(r"[A-Za-z0-9\u0600-\u06ff]+")
 LANG_PREFIX_RE = re.compile(r"^([a-z]{2})(?:[_-]|$)", re.IGNORECASE)
@@ -664,6 +673,11 @@ def process_file(
     signature = build_signature(pages, language, path.stat().st_size)
     outpath, relpath = make_output_path(source_label, input_dir, path)
     book_id = make_book_id(source_label, relpath)
+    source_path = str(path.resolve())
+    source_relpath = relpath
+    source_ext = path.suffix.lower()
+    source_type = source_type_from_path(path)
+    document_type = "html_document" if source_type == "html" else "book"
     quality = analyze_quality(pages, language, path, extractor, path.stat().st_size)
     duplicate_of, score, reason = find_duplicate(
         {
@@ -688,8 +702,11 @@ def process_file(
         "total_pages": len(pages),
         "json_path": str(outpath.relative_to(OUTPUT_DIR)),
         "source_root": str(input_dir),
-        "source_path": str(path),
-        "source_relpath": relpath,
+        "source_path": source_path,
+        "source_relpath": source_relpath,
+        "source_ext": source_ext,
+        "source_type": source_type,
+        "document_type": document_type,
         "source_hash": sha256_file(path),
         "content_hash": signature.content_hash,
         "text_hash": signature.text_hash,
@@ -743,10 +760,18 @@ def update_index(index: Dict, record: Dict) -> None:
     index["files"] = files
     index["total_files"] = len(files)
     languages: Dict[str, int] = {}
+    source_types: Dict[str, int] = {}
+    document_types: Dict[str, int] = {}
     for r in files:
         lang = r.get("language", "unknown")
         languages[lang] = languages.get(lang, 0) + 1
+        source_type = r.get("source_type", "unknown")
+        source_types[source_type] = source_types.get(source_type, 0) + 1
+        document_type = r.get("document_type", "book")
+        document_types[document_type] = document_types.get(document_type, 0) + 1
     index["languages"] = languages
+    index["source_types"] = source_types
+    index["document_types"] = document_types
 
 
 def update_content_index(entries: List[Dict], record: Dict, signature: BookSignature) -> List[Dict]:
@@ -759,6 +784,9 @@ def update_content_index(entries: List[Dict], record: Dict, signature: BookSigna
         "json_path": record["json_path"],
         "source_path": record["source_path"],
         "source_relpath": record["source_relpath"],
+        "source_ext": record.get("source_ext", ""),
+        "source_type": record.get("source_type", "unknown"),
+        "document_type": record.get("document_type", "book"),
         "source_hash": record["source_hash"],
         "quality_status": record.get("quality_status", "ok"),
         "quality_reasons": record.get("quality_reasons", []),
@@ -874,6 +902,9 @@ def main() -> None:
             report_entry = {
                 "source_path": book_json["source_path"],
                 "source_relpath": book_json["source_relpath"],
+                "source_ext": book_json.get("source_ext", ""),
+                "source_type": book_json.get("source_type", "unknown"),
+                "document_type": book_json.get("document_type", "book"),
                 "duplicate_of": duplicate_of.get("json_path"),
                 "duplicate_title": duplicate_of.get("title"),
                 "score": dup_info["score"] if dup_info else 0.0,
@@ -910,6 +941,9 @@ def main() -> None:
             "source_root": book_json["source_root"],
             "source_path": book_json["source_path"],
             "source_relpath": book_json["source_relpath"],
+            "source_ext": book_json.get("source_ext", ""),
+            "source_type": book_json.get("source_type", "unknown"),
+            "document_type": book_json.get("document_type", "book"),
             "source_hash": book_json["source_hash"],
             "content_hash": book_json["content_hash"],
             "quality_status": book_json.get("quality_status", "ok"),

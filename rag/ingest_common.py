@@ -43,6 +43,45 @@ def resolve_index_json_path(record: Dict, json_dir: str) -> str:
     return os.path.join(json_dir, f"{filename}.json")
 
 
+def infer_source_type(record: Dict) -> str:
+    source_type = str(record.get("source_type", "") or "").strip().lower()
+    if source_type:
+        return source_type
+
+    source_ext = str(record.get("source_ext", "") or "").strip().lower()
+    if source_ext in {".htm", ".html"}:
+        return "html"
+    if source_ext:
+        return source_ext.lstrip(".")
+
+    source_path = str(record.get("source_path", "") or record.get("filename", "") or "").strip()
+    if source_path:
+        ext = os.path.splitext(source_path)[1].lower()
+        if ext in {".htm", ".html"}:
+            return "html"
+        if ext:
+            return ext.lstrip(".")
+    return "unknown"
+
+
+def infer_source_ext(record: Dict) -> str:
+    source_ext = str(record.get("source_ext", "") or "").strip().lower()
+    if source_ext:
+        return source_ext
+
+    source_path = str(record.get("source_path", "") or record.get("filename", "") or "").strip()
+    if source_path:
+        return os.path.splitext(source_path)[1].lower()
+    return ""
+
+
+def infer_document_type(record: Dict) -> str:
+    document_type = str(record.get("document_type", "") or "").strip().lower()
+    if document_type:
+        return document_type
+    return "html_document" if infer_source_type(record) == "html" else "book"
+
+
 def chunk_identity_key(chunk: Dict) -> str:
     metadata = chunk.get("metadata", {})
     book_id = metadata.get("book_id", "")

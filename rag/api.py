@@ -10,7 +10,7 @@ import os
 from config import JSON_DIR, QDRANT_PATH, COLLECTION_NAME
 from retriever import retrieve
 from generator import generate, extract_sources
-from ingest_common import resolve_index_json_path
+from ingest_common import infer_document_type, infer_source_ext, infer_source_type, resolve_index_json_path
 
 app = FastAPI(title="RAG Buku Islam", version="0.1.0")
 app.add_middleware(
@@ -97,6 +97,8 @@ def stats():
         point_count = 0
 
     review_counts = {}
+    source_type_counts = {}
+    document_type_counts = {}
     ingest_ready_books = 0
     ingest_ready_pages = 0
     pending_review_books = 0
@@ -104,6 +106,10 @@ def stats():
     for record in idx["files"]:
         review_status = str(record.get("review_status", "approved_auto") or "approved_auto")
         review_counts[review_status] = review_counts.get(review_status, 0) + 1
+        source_type = infer_source_type(record)
+        source_type_counts[source_type] = source_type_counts.get(source_type, 0) + 1
+        document_type = infer_document_type(record)
+        document_type_counts[document_type] = document_type_counts.get(document_type, 0) + 1
         pages = int(record.get("total_pages", 0) or 0)
         if bool(record.get("ingest_ready", True)):
             ingest_ready_books += 1
@@ -123,6 +129,8 @@ def stats():
         "total_points_indexed": point_count,
         "languages": idx["languages"],
         "review_status_counts": review_counts,
+        "source_type_counts": source_type_counts,
+        "document_type_counts": document_type_counts,
     }
 
 
@@ -177,6 +185,11 @@ def list_books():
         "filename": r["filename"],
         "json_filename": os.path.basename(resolve_index_json_path(r, JSON_DIR)),
         "json_path": r.get("json_path", ""),
+        "source_path": r.get("source_path", ""),
+        "source_relpath": r.get("source_relpath", ""),
+        "source_ext": infer_source_ext(r),
+        "source_type": infer_source_type(r),
+        "document_type": infer_document_type(r),
         "title": r["title"],
         "language": r["language"],
         "total_pages": r["total_pages"],
@@ -204,6 +217,11 @@ def book_detail(book_id: str):
         "filename": book["filename"],
         "json_filename": os.path.basename(json_path),
         "json_path": record.get("json_path", ""),
+        "source_path": record.get("source_path", ""),
+        "source_relpath": record.get("source_relpath", ""),
+        "source_ext": infer_source_ext(record),
+        "source_type": infer_source_type(record),
+        "document_type": infer_document_type(record),
         "title": book["title"],
         "language": book["language"],
         "total_pages": book["total_pages"],
