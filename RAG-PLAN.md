@@ -33,6 +33,7 @@ Tujuan sistem:
 │   ├── ingest_common.py
 │   ├── ingest_id.py
 │   ├── retriever.py
+│   ├── run_api.sh
 │   ├── run_ingest.sh
 │   └── static/index.html
 └── RAG-PLAN.md
@@ -41,6 +42,7 @@ Tujuan sistem:
 Catatan:
 - `../DATABASE/json_output/` dan `../DATABASE/qdrant_db/` sengaja tidak dipush ke git
 - file kerja yang dipush adalah kode, script, dan dokumentasi
+- `rag/run_api.sh` adalah launcher lokal untuk menyajikan UI search di `http://127.0.0.1:8000`
 
 ## Arsitektur Runtime
 
