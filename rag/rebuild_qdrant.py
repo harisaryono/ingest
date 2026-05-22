@@ -93,14 +93,18 @@ def choose_python() -> str:
     return sys.executable
 
 
-def run_ingest() -> int:
+def run_ingest(languages: str | None = None) -> int:
     env = os.environ.copy()
     env.setdefault("EMBED_BATCH_SIZE", "128")
     env.setdefault("EMBED_TIMEOUT", "120")
     env["PYTHONUNBUFFERED"] = "1"
+    if languages:
+        env["INGEST_LANGUAGES"] = languages
     env.pop("INGEST_SKIP_BOOTSTRAP", None)
     python_bin = choose_python()
+    active_languages = env.get("INGEST_LANGUAGES", "id")
     log(f"Using Python interpreter: {python_bin}")
+    log(f"Using ingest languages: {active_languages}")
     with REBUILD_LOG_PATH.open("a", encoding="utf-8") as child_log:
         child_log.write(f"\n=== ingest started {utc_now()} ===\n")
         child_log.flush()
@@ -131,6 +135,11 @@ def main() -> int:
             "--force",
             action="store_true",
             help="archive the current qdrant_db again and restart from scratch",
+        )
+        parser.add_argument(
+            "--languages",
+            default=os.environ.get("INGEST_LANGUAGES", "id"),
+            help="comma-separated language codes to ingest (default: id)",
         )
         args = parser.parse_args()
 
@@ -174,7 +183,7 @@ def main() -> int:
         save_rebuild_state(state)
 
         log("Running ingest pipeline...")
-        code = run_ingest()
+        code = run_ingest(args.languages)
         if code == 0:
             state["status"] = "complete"
             state["finished_at"] = utc_now()

@@ -34,16 +34,25 @@ def log(msg: str) -> None:
     print(msg, flush=True)
 
 
+def parse_languages() -> List[str]:
+    raw = os.environ.get("INGEST_LANGUAGES", "id").strip()
+    if not raw:
+        return ["id"]
+    langs = [part.strip().lower() for part in raw.split(",") if part.strip()]
+    return langs or ["id"]
+
+
 def main() -> None:
+    selected_languages = parse_languages()
     log("=" * 50)
-    log("RAG Ingestion - Qdrant (Indonesian only)")
+    log(f"RAG Ingestion - Qdrant ({', '.join(selected_languages)})")
     log("=" * 50)
 
     index_path = os.path.join(JSON_DIR, "_index.json")
     with open(index_path, "r", encoding="utf-8") as f:
         index_data = json.load(f)
 
-    files = [f for f in index_data["files"] if f["language"] == "id"]
+    files = [f for f in index_data["files"] if f["language"] in selected_languages]
     limit_env = os.environ.get("INGEST_LIMIT_BOOKS", "").strip()
     if limit_env:
         try:
@@ -53,7 +62,7 @@ def main() -> None:
             log(f"Ignoring invalid INGEST_LIMIT_BOOKS={limit_env!r}")
     force_refresh = os.environ.get("INGEST_FORCE_REFRESH", "").strip().lower() in {"1", "true", "yes", "on"}
     total_files = len(files)
-    log(f"Total ID books: {total_files}")
+    log(f"Total books in scope: {total_files}")
 
     client = QdrantClient(path=QDRANT_PATH)
     collection_created = ensure_collection(client)
