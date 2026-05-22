@@ -19,9 +19,13 @@ Tujuan sistem:
 
 ```
 ./
+├── .env.example
+├── README.md
 ├── requirements.txt
 ├── convert_to_json.py
 ├── import_islamhouse.py
+├── eval/
+│   └── queries.jsonl
 ├── ../DATABASE/json_output/   # runtime data hasil konversi, di luar repo
 ├── ../DATABASE/json_output/_content_index.json
 ├── ../DATABASE/qdrant_db/     # runtime data vector store lokal, di luar repo
@@ -35,6 +39,7 @@ Tujuan sistem:
 │   ├── ingest.py
 │   ├── ingest_common.py
 │   ├── ingest_id.py
+│   ├── evaluate_retrieval.py
 │   ├── review_book.py
 │   ├── retriever.py
 │   ├── run_api.sh

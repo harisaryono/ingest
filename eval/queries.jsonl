@@ -1,0 +1,5 @@
+{"query":"cara sholat sesuai nabi","must_have":["sholat","nabi"],"expected_titles":["Sifat Shalat Nabi"],"language":"id"}
+{"query":"tata cara wudhu","must_have":["wudhu"],"expected_titles":["Tata Cara Praktis Wudhu"],"language":"id"}
+{"query":"hukum bidah","must_have":["bidah"],"expected_titles":["Waspada Terhadap Bidah"],"language":"id"}
+{"query":"what is islam","must_have":["islam"],"expected_titles":["Message of Islam"],"language":"en"}
+{"query":"من هو الله","must_have":["الله"],"expected_titles":[],"language":"ar"}
