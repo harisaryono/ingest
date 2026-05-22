@@ -30,7 +30,7 @@ def _load_index() -> Dict:
 
 def _book_entry(book_id: str) -> Dict | None:
     for record in _load_index().get("files", []):
-        record_book_id = os.path.splitext(record["filename"])[0]
+        record_book_id = record.get("book_id") or os.path.splitext(record["filename"])[0]
         if record_book_id == book_id:
             return record
     return None
@@ -148,7 +148,7 @@ def search(q: str, top_k: int = 5, language: str = "id"):
 @app.get("/books")
 def list_books():
     return [{
-        "book_id": os.path.splitext(r["filename"])[0],
+        "book_id": r.get("book_id") or os.path.splitext(r["filename"])[0],
         "filename": r["filename"],
         "json_filename": os.path.basename(resolve_index_json_path(r, JSON_DIR)),
         "title": r["title"],
@@ -171,7 +171,7 @@ def book_detail(book_id: str):
         book = json.load(f)
 
     return {
-        "book_id": book_id,
+        "book_id": record.get("book_id") or book_id,
         "filename": book["filename"],
         "json_filename": os.path.basename(json_path),
         "title": book["title"],

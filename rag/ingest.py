@@ -96,7 +96,7 @@ def main() -> None:
 
     for idx, book_info in enumerate(files, 1):
         filename = book_info["filename"]
-        book_id = os.path.splitext(filename)[0]
+        book_id = book_info.get("book_id") or os.path.splitext(filename)[0]
         json_path = resolve_index_json_path(book_info, JSON_DIR)
         book_start = time.time()
 

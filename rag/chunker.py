@@ -68,7 +68,7 @@ def chunk_book(book_json_path: str) -> List[Dict]:
     with open(book_json_path, "r", encoding="utf-8") as f:
         book = json.load(f)
 
-    book_id = os.path.splitext(book["filename"])[0]
+    book_id = book.get("book_id") or os.path.splitext(book["filename"])[0]
     title = book["title"]
     language = book["language"]
     filename = book["filename"]
