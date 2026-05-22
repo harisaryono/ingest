@@ -1,11 +1,14 @@
 import os
 
-OLLAMA_BASE = "http://localhost:11434"
+OLLAMA_BASE = os.getenv("OLLAMA_BASE", "http://127.0.0.1:11434")
 EMBED_MODEL = "nomic-embed-text"
 LLM_MODEL = "qwen3:4b"
 
 GENERATION_BACKEND = "auto"
-LEASE_COORDINATOR_URL = "http://127.0.0.1:9000/chat/completions"
+LEASE_COORDINATOR_URL = os.getenv(
+    "LEASE_COORDINATOR_URL",
+    "http://127.0.0.1:9000/chat/completions",
+)
 LEASE_MODEL = "gpt-oss-120b"
 
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
