@@ -29,7 +29,7 @@ from config import JSON_DIR, QDRANT_PATH, COLLECTION_NAME, LEXICAL_INDEX_PATH
 import retriever as retriever_module
 from retriever import retrieve
 from generator import generate, extract_sources, generate_local, generate_remote
-from reference_replace import apply_reference_markers, search_dorar_candidates
+from reference_replace import apply_reference_markers, search_dorar_candidates, search_local_hadith
 from ingest_common import (
     infer_conversion_status,
     infer_document_type,
@@ -1295,6 +1295,16 @@ textarea:focus,input[type="text"]:focus{{border-color:rgba(120,215,255,.4);box-s
           <div id="dorarResults" class="readout" style="min-height:12vh;"></div>
         </div>
         <div class="group">
+          <div class="label">Cari hadits lokal</div>
+          <div style="display:flex;gap:8px;flex-wrap:wrap;">
+            <input id="localHadithQuery" type="text" placeholder="Contoh: إنما الأعمال بالنيات" style="flex:1 1 260px;">
+            <input id="localHadithCollection" type="text" placeholder="Koleksi opsional: bukhari, muslim, nawawi40" style="flex:1 1 220px;">
+            <button id="searchLocalHadith" type="button" class="secondary">Cari Lokal</button>
+          </div>
+          <div class="status">Pencarian lokal memakai dataset hadits yang sudah diimpor. Kosongkan koleksi untuk cari semua koleksi.</div>
+          <div id="localHadithResults" class="readout" style="min-height:12vh;"></div>
+        </div>
+        <div class="group">
           <div class="label">Preview hasil marker</div>
           <textarea id="markerOutput" class="draft" placeholder="Hasil preview marker replacement akan muncul di sini" readonly></textarea>
           <div id="markerDiff" class="readout" style="min-height:12vh;">Belum ada preview marker.</div>
@@ -1329,6 +1339,9 @@ textarea:focus,input[type="text"]:focus{{border-color:rgba(120,215,255,.4);box-s
   const markerHint = document.getElementById('markerHint');
   const dorarQuery = document.getElementById('dorarQuery');
   const dorarResults = document.getElementById('dorarResults');
+  const localHadithQuery = document.getElementById('localHadithQuery');
+  const localHadithCollection = document.getElementById('localHadithCollection');
+  const localHadithResults = document.getElementById('localHadithResults');
   const autoDorarFirst = document.getElementById('autoDorarFirst');
   const status = document.getElementById('status');
   const pageJump = document.getElementById('pageJump');
@@ -1415,6 +1428,7 @@ textarea:focus,input[type="text"]:focus{{border-color:rgba(120,215,255,.4);box-s
   }}
   let currentDorarMap = {{}};
   let currentDorarChoices = {{}};
+  let currentLocalHadithMap = {{}};
   async function postJson(url, body) {{
     const resp = await fetch(url, {{
       method: 'POST',
@@ -1469,6 +1483,48 @@ textarea:focus,input[type="text"]:focus{{border-color:rgba(120,215,255,.4);box-s
       <pre style="white-space:pre-wrap;line-height:1.5;margin:0;">${{escapeInline(diffText)}}</pre>
     `;
   }}
+  function renderLocalHadithCandidates(map) {{
+    const entries = Object.entries(map || {{}});
+    if (!entries.length) {{
+      localHadithResults.innerHTML = '<div class="empty">Belum ada hasil hadits lokal.</div>';
+      return;
+    }}
+    localHadithResults.innerHTML = entries.map(([query, items]) => {{
+      const rows = (items || []).map((item, idx) => {{
+        const text = escapeInline(item.text || '');
+        const source = escapeInline(item.source || '');
+        const grade = escapeInline(item.grade || '');
+        return `
+          <div style="border-top:1px solid var(--line);padding-top:10px;margin-top:10px;">
+            <div style="font-size:12px;color:var(--muted);margin-bottom:6px;">#${{idx + 1}} ${{source ? `· ${{source}}` : ''}} ${{grade ? `· ${{grade}}` : ''}}</div>
+            <div style="white-space:pre-wrap;line-height:1.6;">${{text || '(kosong)'}} </div>
+            <div class="buttons" style="margin-top:8px;">
+              <button type="button" class="secondary" data-insert-local-hadith="${{encodeURIComponent(query)}}" data-index="${{idx}}">Sisipkan</button>
+            </div>
+          </div>
+        `;
+      }}).join('');
+      return `
+        <div style="margin-bottom:14px;">
+          <div style="font-weight:700;margin-bottom:6px;">${{escapeInline(query)}}</div>
+          <div style="color:var(--muted);font-size:13px;">${{items.length}} hasil lokal</div>
+          ${{rows}}
+        </div>
+      `;
+    }}).join('');
+    localHadithResults.querySelectorAll('[data-insert-local-hadith]').forEach(btn => {{
+      btn.addEventListener('click', () => {{
+        const query = decodeURIComponent(btn.dataset.insertLocalHadith || '');
+        const idx = parseInt(btn.dataset.index || '0', 10);
+        const entry = Object.entries(currentLocalHadithMap).find(([k]) => k === query);
+        const items = entry ? entry[1] : [];
+        const item = items[idx];
+        if (!item) return;
+        insertAtCursor(pageContent, item.text || '');
+        setStatus(`Kandidat hadits lokal disisipkan untuk query: ${{query}}`);
+      }});
+    }});
+  }}
   async function previewMarkers() {{
     setStatus('Membuat preview marker...');
     const data = await postJson(`${{api}}/books/${{encodeURIComponent(bookId)}}/pages/${{pageNum}}/apply-markers`, {{
@@ -1509,6 +1565,23 @@ textarea:focus,input[type="text"]:focus{{border-color:rgba(120,215,255,.4);box-s
     currentDorarMap = {{ [query]: data.results || [] }};
     renderDorarCandidates(currentDorarMap);
     setStatus(`Dorar menemukan ${{(data.results || []).length}} kandidat untuk query: ${{query}}`);
+  }}
+  async function searchLocalHadith() {{
+    const query = (localHadithQuery.value || '').trim();
+    const collection = (localHadithCollection.value || '').trim();
+    if (!query) {{
+      setStatus('Masukkan query hadits lokal dulu.');
+      return;
+    }}
+    setStatus('Mencari hadits lokal...');
+    const data = await postJson(`${{api}}/admin/hadith/local/search`, {{
+      query,
+      collection,
+      limit: 10
+    }});
+    currentLocalHadithMap = {{ [query]: data.results || [] }};
+    renderLocalHadithCandidates(currentLocalHadithMap);
+    setStatus(`Hadits lokal menemukan ${{(data.results || []).length}} kandidat untuk query: ${{query}}`);
   }}
   document.getElementById('savePage').addEventListener('click', async () => {{
     try {{
@@ -1608,6 +1681,13 @@ textarea:focus,input[type="text"]:focus{{border-color:rgba(120,215,255,.4);box-s
       setStatus(`Cari Dorar gagal: ${{err.message}}`);
     }}
   }});
+  document.getElementById('searchLocalHadith').addEventListener('click', async () => {{
+    try {{
+      await searchLocalHadith();
+    }} catch (err) {{
+      setStatus(`Cari hadits lokal gagal: ${{err.message}}`);
+    }}
+  }});
   document.getElementById('goPage').addEventListener('click', () => {{
     const next = parseInt(pageJump.value, 10);
     if (!Number.isFinite(next) || next < 1) return;
@@ -1621,6 +1701,8 @@ textarea:focus,input[type="text"]:focus{{border-color:rgba(120,215,255,.4);box-s
   currentDorarMap = {{}};
   currentDorarChoices = {{}};
   renderDorarCandidates(currentDorarMap);
+  currentLocalHadithMap = {{}};
+  renderLocalHadithCandidates(currentLocalHadithMap);
   markerOutput.value = '';
   markerDiff.textContent = 'Belum ada preview marker.';
 }})();
@@ -2725,6 +2807,12 @@ class DorarSearchRequest(BaseModel):
     limit: int = 5
 
 
+class LocalHadithSearchRequest(BaseModel):
+    query: str
+    limit: int = 10
+    collection: str = ""
+
+
 class ReviewActionRequest(BaseModel):
     scope: str = "book"
     action: str
@@ -3430,6 +3518,23 @@ def dorar_search(req: DorarSearchRequest):
     return {
         "ok": True,
         "query": query,
+        "limit": limit,
+        "results": results,
+    }
+
+
+@app.post("/admin/hadith/local/search")
+def local_hadith_search(req: LocalHadithSearchRequest):
+    query = (req.query or "").strip()
+    if not query:
+        raise HTTPException(status_code=400, detail="query is required")
+    limit = max(1, min(int(req.limit or 10), 50))
+    collection = (req.collection or "").strip()
+    results = search_local_hadith(query, limit=limit, collection=collection)
+    return {
+        "ok": True,
+        "query": query,
+        "collection": collection,
         "limit": limit,
         "results": results,
     }

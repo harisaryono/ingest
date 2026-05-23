@@ -1,6 +1,7 @@
 import json
 import os
 import re
+import unicodedata
 from functools import lru_cache
 from typing import Dict, List, Tuple
 
@@ -20,6 +21,62 @@ DORAR_LOCAL_HADITH_RE = re.compile(
     re.I | re.S,
 )
 DORAR_RE = re.compile(r"\[\[(?:DORAR_SEARCH|FIX_HADITH_DORAR|CANDIDATE_HADITH_DORAR)\s+(.+?)\]\]", re.I | re.S)
+HADITH_INDEX_PATH = os.path.join(HADITH_REFERENCE_DIR, "index.json")
+HADITH_COLLECTION_ALIASES = {
+    "sahih_bukhari": "bukhari",
+    "sahih_al_bukhari": "bukhari",
+    "bukhari": "bukhari",
+    "sahih_muslim": "muslim",
+    "sahih_al_muslim": "muslim",
+    "muslim": "muslim",
+    "sunan_abi_dawud": "abudawud",
+    "sunan_abu_dawud": "abudawud",
+    "abu_dawud": "abudawud",
+    "abudawud": "abudawud",
+    "abu_daud": "abudawud",
+    "sunan_at_tirmidhi": "tirmidhi",
+    "jami_at_tirmidhi": "tirmidhi",
+    "jami_tirmidhi": "tirmidhi",
+    "tirmidhi": "tirmidhi",
+    "at_tirmidhi": "tirmidhi",
+    "sunan_an_nasai": "nasai",
+    "sunan_an_nasa_i": "nasai",
+    "sunan_an_nasa": "nasai",
+    "nasai": "nasai",
+    "an_nasai": "nasai",
+    "an_nasa_i": "nasai",
+    "sunan_ibn_majah": "ibnmajah",
+    "ibn_majah": "ibnmajah",
+    "ibnmajah": "ibnmajah",
+    "muwatta_malik": "malik",
+    "al_muwatta": "malik",
+    "muwatta": "malik",
+    "malik": "malik",
+    "musnad_ahmad": "ahmed",
+    "musnad_ahmed": "ahmed",
+    "ahmad": "ahmed",
+    "ahmed": "ahmed",
+    "darimi": "darimi",
+    "sunan_darimi": "darimi",
+    "riyad_as_salihin": "riyad_assalihin",
+    "riyadh_as_salihin": "riyad_assalihin",
+    "riyad_assalihin": "riyad_assalihin",
+    "riyadussalihin": "riyad_assalihin",
+    "shamail_muhammadiyah": "shamail_muhammadiyah",
+    "bulugh_al_maram": "bulugh_almaram",
+    "bulugh_almaram": "bulugh_almaram",
+    "al_adab_al_mufrad": "aladab_almufrad",
+    "aladab_al_mufrad": "aladab_almufrad",
+    "aladab_almufrad": "aladab_almufrad",
+    "mishkat_al_masabih": "mishkat_almasabih",
+    "mishkat_almasabih": "mishkat_almasabih",
+    "forty_hadith_nawawi": "nawawi40",
+    "nawawi40": "nawawi40",
+    "forty_hadith_qudsi": "qudsi40",
+    "qudsi40": "qudsi40",
+    "forty_hadith_shah_waliullah": "shahwaliullah40",
+    "shahwaliullah40": "shahwaliullah40",
+}
 
 
 def _load_json(path: str, default):
@@ -122,7 +179,6 @@ def _persist_quran_entry(key: str, entry: Dict) -> None:
 
 
 @lru_cache(maxsize=1024)
-@lru_cache(maxsize=8)
 def load_quran_reference() -> Dict[str, Dict]:
     merged: Dict[str, Dict] = {}
     sources = [
@@ -178,6 +234,54 @@ def load_quran_reference() -> Dict[str, Dict]:
     return merged
 
 
+def _normalize_hadith_collection_name(name: str) -> str:
+    value = (name or "").strip().lower()
+    value = unicodedata.normalize("NFKC", value)
+    value = value.replace("'", "").replace("`", "")
+    value = re.sub(r"[^a-z0-9]+", "_", value)
+    value = re.sub(r"_+", "_", value).strip("_")
+    return value
+
+
+@lru_cache(maxsize=1)
+def _load_hadith_index() -> Dict[str, Dict]:
+    data = _load_json(HADITH_INDEX_PATH, {})
+    if not isinstance(data, dict):
+        return {}
+    books = data.get("books") if isinstance(data.get("books"), list) else []
+    out: Dict[str, Dict] = {}
+    for book in books:
+        if not isinstance(book, dict):
+            continue
+        collection = _normalize_hadith_collection_name(str(book.get("collection") or ""))
+        if collection:
+            out[collection] = book
+    return out
+
+
+def resolve_hadith_collection(collection: str) -> str:
+    normalized = _normalize_hadith_collection_name(collection)
+    if not normalized:
+        return ""
+    alias = HADITH_COLLECTION_ALIASES.get(normalized, normalized)
+    index = _load_hadith_index()
+    if alias in index:
+        return alias
+    if normalized in index:
+        return normalized
+    alias_compact = alias.replace("_", "")
+    for key in index.keys():
+        if key.replace("_", "") in {alias_compact, normalized.replace("_", "")}:
+            return key
+    return alias
+
+
+def _hadith_collection_record(collection: str) -> Dict:
+    resolved = resolve_hadith_collection(collection)
+    index = _load_hadith_index()
+    return index.get(resolved) or index.get(_normalize_hadith_collection_name(collection)) or {}
+
+
 def lookup_quran_entry(surah: int | str, ayah: int | str) -> Dict:
     key = _normalize_quran_key(surah, ayah)
     local = load_quran_reference().get(key)
@@ -186,16 +290,26 @@ def lookup_quran_entry(surah: int | str, ayah: int | str) -> Dict:
 
 @lru_cache(maxsize=32)
 def load_hadith_collection(collection: str) -> Dict:
-    collection = (collection or "").strip().lower()
+    collection = resolve_hadith_collection(collection)
     if not collection:
         return {}
+    record = _hadith_collection_record(collection)
+    candidate_paths = []
+    for key in ("output_path", "path", "json_path"):
+        value = str(record.get(key) or "").strip()
+        if value:
+            candidate_paths.append(value)
     candidates = [
         os.path.join(HADITH_REFERENCE_DIR, f"{collection}.json"),
         os.path.join(HADITH_REFERENCE_DIR, f"{collection}.jsonl"),
         os.path.join(HADITH_REFERENCE_DIR, "by_book", f"{collection}.json"),
         os.path.join(HADITH_REFERENCE_DIR, "by_book", f"{collection}.jsonl"),
     ]
-    for path in candidates:
+    seen_paths = []
+    for path in candidate_paths + candidates:
+        if not path or path in seen_paths:
+            continue
+        seen_paths.append(path)
         if os.path.exists(path):
             if path.endswith(".jsonl"):
                 out = {}
@@ -228,7 +342,7 @@ def load_hadith_collection(collection: str) -> Dict:
 
 
 def lookup_hadith_entry(collection: str, number: str) -> Dict:
-    collection = (collection or "").strip().lower()
+    collection = resolve_hadith_collection(collection)
     number = str(number or "").strip()
     if not collection or not number:
         return {}
@@ -259,6 +373,160 @@ def lookup_hadith_entry(collection: str, number: str) -> Dict:
         if item_number and item_number == number:
             return item
     return {}
+
+
+def _contains_arabic(text: str) -> bool:
+    return bool(re.search(r"[\u0600-\u06FF]", text or ""))
+
+
+def _normalize_search_text(text: str) -> str:
+    value = unicodedata.normalize("NFKC", str(text or ""))
+    value = value.lower().replace("\u0640", "")
+    value = re.sub(r"[\u064B-\u065F\u0670]", "", value)
+    value = re.sub(r"\s+", " ", value)
+    return value.strip()
+
+
+def _normalize_search_tokens(text: str) -> List[str]:
+    tokens = re.findall(r"[\w\u0600-\u06FF]+", _normalize_search_text(text))
+    out: List[str] = []
+    for token in tokens:
+        token = token.strip()
+        if len(token) < 2:
+            continue
+        out.append(token)
+    return out
+
+
+def _hadith_source_label(collection: str, entry: Dict) -> str:
+    record = _hadith_collection_record(collection)
+    english_title = str(record.get("english_title") or "").strip()
+    arabic_title = str(record.get("arabic_title") or "").strip()
+    title = english_title or arabic_title or collection
+    chapter = str(entry.get("chapter_title_en") or entry.get("chapter_title_ar") or "").strip()
+    if chapter and chapter != title:
+        return f"{collection} · {title} · {chapter}"
+    return f"{collection} · {title}"
+
+
+def _hadith_preview_text(entry: Dict) -> str:
+    parts = [
+        str(entry.get("arabic") or entry.get("text") or "").strip(),
+        str(entry.get("translation_id") or entry.get("translation") or entry.get("english_text") or "").strip(),
+        str(entry.get("translation_en") or "").strip(),
+    ]
+    parts = [part for part in parts if part]
+    if not parts:
+        return ""
+    if len(parts) == 1:
+        return parts[0]
+    return "\n\n".join(parts[:2]).strip()
+
+
+def search_local_hadith(query: str, limit: int = 10, collection: str = "") -> List[Dict]:
+    query = str(query or "").strip()
+    limit = max(1, min(int(limit or 10), 50))
+    if not query:
+        return []
+
+    requested_collection = resolve_hadith_collection(collection)
+    parsed_collection = ""
+    parsed_number = ""
+    match = re.match(r"^\s*([a-z0-9_]+)\s*:\s*([0-9a-zA-Z_.-]+)\s*$", query, re.I)
+    if match:
+        parsed_collection = resolve_hadith_collection(match.group(1))
+        parsed_number = str(match.group(2)).strip()
+
+    candidate_collections: List[str]
+    if requested_collection:
+        candidate_collections = [requested_collection]
+    elif parsed_collection:
+        candidate_collections = [parsed_collection]
+    else:
+        candidate_collections = sorted(_load_hadith_index().keys())
+
+    if not candidate_collections:
+        return []
+
+    normalized_query = _normalize_search_text(query)
+    tokens = _normalize_search_tokens(query)
+    arabic_query = _contains_arabic(query)
+    scored: List[Tuple[float, Dict]] = []
+
+    for coll in candidate_collections:
+        data = load_hadith_collection(coll)
+        if not data:
+            continue
+        for key, entry in data.items():
+            if not isinstance(entry, dict) or str(key).startswith("_"):
+                continue
+
+            hadith_key = str(entry.get("key") or entry.get("id") or entry.get("number") or key).strip()
+            number = str(entry.get("number") or entry.get("hadith_number") or entry.get("no") or "").strip()
+            entry_text = _normalize_search_text(
+                " \n ".join(
+                    part
+                    for part in [
+                        entry.get("arabic", ""),
+                        entry.get("translation_id", ""),
+                        entry.get("translation_en", ""),
+                        entry.get("english_text", ""),
+                        entry.get("text", ""),
+                        entry.get("narrator", ""),
+                        entry.get("english_narrator", ""),
+                        entry.get("chapter_title_ar", ""),
+                        entry.get("chapter_title_en", ""),
+                    ]
+                    if part
+                )
+            )
+            if not entry_text:
+                continue
+
+            score = 0.0
+            if normalized_query and normalized_query == entry_text:
+                score += 1000.0
+            if normalized_query and normalized_query in entry_text:
+                score += 500.0
+            if tokens:
+                hits = sum(1 for token in tokens if token in entry_text)
+                if hits:
+                    score += hits * 40.0
+                    score += (hits / max(len(tokens), 1)) * 30.0
+            if arabic_query and _contains_arabic(str(entry.get("arabic") or "")):
+                score += 20.0
+            if parsed_number and number and parsed_number == number:
+                score += 160.0
+            if parsed_collection and coll == parsed_collection:
+                score += 25.0
+            if query.isdigit() and number == query:
+                score += 140.0
+            if normalized_query and hadith_key and normalized_query == _normalize_search_text(hadith_key):
+                score += 150.0
+            if normalized_query and hadith_key and normalized_query in _normalize_search_text(hadith_key):
+                score += 40.0
+            if score <= 0:
+                continue
+
+            preview = _hadith_preview_text(entry)
+            scored.append(
+                (
+                    score,
+                    {
+                        "collection": coll,
+                        "number": number or str(entry.get("number") or entry.get("id") or ""),
+                        "key": hadith_key,
+                        "text": preview or str(entry.get("arabic") or entry.get("translation_en") or entry.get("translation_id") or ""),
+                        "source": _hadith_source_label(coll, entry),
+                        "grade": str(entry.get("grade") or entry.get("hukm") or entry.get("verdict") or "").strip(),
+                        "raw": entry,
+                    },
+                )
+            )
+
+    scored.sort(key=lambda item: (-item[0], item[1].get("collection", ""), item[1].get("number", ""), item[1].get("key", "")))
+    results = [item[1] for item in scored[:limit]]
+    return results
 
 
 def format_quran(entry: Dict, mode: str = "ar") -> str:
