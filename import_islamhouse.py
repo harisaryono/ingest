@@ -829,6 +829,21 @@ def write_duplicate_report(path: Path, entry: Dict) -> None:
         f.write(json.dumps(entry, ensure_ascii=False) + "\n")
 
 
+def run_canonicalizer(prune_qdrant: bool = True) -> int:
+    script = SCRIPT_DIR / "rag" / "canonicalize_islamhouse.py"
+    if not script.exists():
+        log(f"Canonicalizer missing: {script}")
+        return 1
+
+    cmd = [sys.executable, str(script)]
+    if prune_qdrant:
+        cmd.append("--prune-qdrant")
+    log(f"Running canonicalizer: {' '.join(cmd)}")
+    proc = subprocess.run(cmd, cwd=str(SCRIPT_DIR), check=False)
+    log(f"Canonicalizer finished with rc={proc.returncode}")
+    return proc.returncode
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(description="Import Islamhouse sources into json_output")
     parser.add_argument("--input-dir", default=str(DEFAULT_INPUT_DIR), help="source directory to scan")
@@ -838,6 +853,8 @@ def main() -> None:
     parser.add_argument("--keep-suspect", action="store_true", help="legacy flag; suspect books are still written but remain pending review")
     parser.add_argument("--duplicate-threshold", type=float, default=0.92, help="page overlap threshold for duplicate detection")
     parser.add_argument("--limit", type=int, default=0, help="process at most N files for testing")
+    parser.add_argument("--skip-canonicalize", action="store_true", help="skip post-import family canonicalization")
+    parser.add_argument("--no-prune-qdrant", action="store_true", help="keep Qdrant state untouched when canonicalizing")
     args = parser.parse_args()
 
     input_dir = Path(args.input_dir).expanduser().resolve()
@@ -1006,6 +1023,11 @@ def main() -> None:
     log(f"Index path          : {INDEX_PATH}")
     log(f"Content index path  : {CONTENT_INDEX_PATH}")
     log(f"Duplicate report    : {DUPLICATE_REPORT_PATH}")
+
+    if not args.skip_canonicalize:
+        rc = run_canonicalizer(prune_qdrant=not args.no_prune_qdrant)
+        if rc != 0:
+            log(f"WARNING canonicalizer returned non-zero exit code: {rc}")
 
 
 if __name__ == "__main__":
