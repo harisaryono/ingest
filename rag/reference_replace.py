@@ -4,11 +4,11 @@ import re
 from functools import lru_cache
 from typing import Dict, List, Tuple
 
-import requests
-
 from config import (
     HADITH_REFERENCE_DIR,
+    QURAN_REFERENCE_SOURCE_PATH,
     QURAN_REFERENCE_PATH,
+    QURAN_TRANSLATION_EN_PATH,
     QURAN_TRANSLATION_PATH,
 )
 from dorar_client import search_dorar_hadith
@@ -20,7 +20,6 @@ DORAR_LOCAL_HADITH_RE = re.compile(
     re.I | re.S,
 )
 DORAR_RE = re.compile(r"\[\[(?:DORAR_SEARCH|FIX_HADITH_DORAR|CANDIDATE_HADITH_DORAR)\s+(.+?)\]\]", re.I | re.S)
-QURAN_ONLINE_BASE = "https://api.alquran.cloud/v1"
 
 
 def _load_json(path: str, default):
@@ -32,6 +31,46 @@ def _load_json(path: str, default):
     except Exception:
         return default
     return data if isinstance(data, type(default)) else default
+
+
+def _load_pipe_quran(path: str, *, translation_field: str = "") -> Dict[str, Dict]:
+    if not path or not os.path.exists(path):
+        return {}
+    out: Dict[str, Dict] = {}
+    try:
+        with open(path, "r", encoding="utf-8") as f:
+            for raw_line in f:
+                line = raw_line.strip()
+                if not line or line.startswith("#"):
+                    continue
+                parts = line.split("|", 2)
+                if len(parts) < 3:
+                    continue
+                surah, ayah, text = parts[0].strip(), parts[1].strip(), parts[2].strip()
+                if not surah or not ayah:
+                    continue
+                key = _normalize_quran_key(surah, ayah)
+                entry = out.setdefault(
+                    key,
+                    {
+                        "key": key,
+                        "surah": int(surah),
+                        "ayah": int(ayah),
+                        "arabic": "",
+                        "translation_id": "",
+                        "translation_en": "",
+                        "raw": {},
+                    },
+                )
+                if translation_field == "translation_en":
+                    entry["translation_en"] = text
+                elif translation_field == "translation_id":
+                    entry["translation_id"] = text
+                else:
+                    entry["arabic"] = text
+    except Exception:
+        return {}
+    return out
 
 
 def _normalize_quran_key(surah: str, ayah: str) -> str:
@@ -49,12 +88,14 @@ def _coerce_quran_entry(entry: Dict, key: str) -> Dict:
         or entry.get("terjemah")
         or ""
     )
+    translation_en = entry.get("translation_en") or entry.get("translation_en_sahih") or entry.get("en_translation") or ""
     return {
         "key": entry.get("key", key),
         "surah": int(entry.get("surah", key.split(":")[0]) or key.split(":")[0]),
         "ayah": int(entry.get("ayah", key.split(":")[1]) or key.split(":")[1]),
         "arabic": str(arabic).strip(),
         "translation_id": str(translation).strip(),
+        "translation_en": str(translation_en).strip(),
         "raw": entry,
     }
 
@@ -65,12 +106,14 @@ def _persist_quran_entry(key: str, entry: Dict) -> None:
         quran = _load_json(QURAN_REFERENCE_PATH, {})
         if not isinstance(quran, dict):
             quran = {}
+        existing = quran.get(key, {}) if isinstance(quran.get(key, {}), dict) else {}
         quran[key] = {
             "key": key,
             "surah": entry.get("surah"),
             "ayah": entry.get("ayah"),
-            "arabic": entry.get("arabic", ""),
-            "translation_id": entry.get("translation_id", ""),
+            "arabic": entry.get("arabic", existing.get("arabic", "")),
+            "translation_id": entry.get("translation_id", existing.get("translation_id", "")),
+            "translation_en": entry.get("translation_en", existing.get("translation_en", "")),
         }
         with open(QURAN_REFERENCE_PATH, "w", encoding="utf-8") as f:
             json.dump(quran, f, ensure_ascii=False, indent=2, sort_keys=True)
@@ -79,86 +122,58 @@ def _persist_quran_entry(key: str, entry: Dict) -> None:
 
 
 @lru_cache(maxsize=1024)
-def _fetch_quran_ayah_online(key: str) -> Dict:
-    try:
-        surah, ayah = key.split(":", 1)
-        response = requests.get(
-            f"{QURAN_ONLINE_BASE}/ayah/{int(surah)}:{int(ayah)}/editions/quran-uthmani,id.indonesian",
-            timeout=20,
-            headers={"User-Agent": "rag-review-workspace/1.0"},
-        )
-        response.raise_for_status()
-        data = response.json()
-    except Exception:
-        return {}
-
-    arabic = ""
-    translation = ""
-    items = data.get("data") if isinstance(data, dict) else []
-    if isinstance(items, list):
-        for item in items:
-            if not isinstance(item, dict):
-                continue
-            identifier = str(item.get("edition", {}).get("identifier", "") or "").lower()
-            text = str(item.get("text", "") or "").strip()
-            if identifier == "quran-uthmani":
-                arabic = text
-            elif identifier in {"id.indonesian", "id.muntakhab", "id.jalalayn"} and not translation:
-                translation = text
-
-    if not arabic and isinstance(items, list) and items:
-        first = items[0] if isinstance(items[0], dict) else {}
-        arabic = str(first.get("text", "") or "").strip()
-
-    if not arabic:
-        return {}
-
-    surah_no, ayah_no = key.split(":", 1)
-    entry = {
-        "key": key,
-        "surah": int(surah_no),
-        "ayah": int(ayah_no),
-        "arabic": arabic,
-        "translation_id": translation,
-    }
-    _persist_quran_entry(key, entry)
-    return entry
-
-
 @lru_cache(maxsize=8)
 def load_quran_reference() -> Dict[str, Dict]:
-    primary = _load_json(QURAN_REFERENCE_PATH, {})
-    translation = _load_json(QURAN_TRANSLATION_PATH, {})
     merged: Dict[str, Dict] = {}
+    sources = [
+        _load_pipe_quran(QURAN_REFERENCE_SOURCE_PATH, translation_field=""),
+        _load_json(QURAN_REFERENCE_PATH, {}),
+        _load_pipe_quran(QURAN_TRANSLATION_PATH, translation_field="translation_id"),
+        _load_pipe_quran(QURAN_TRANSLATION_EN_PATH, translation_field="translation_en"),
+    ]
 
-    if isinstance(primary, dict):
-        for key, entry in primary.items():
-            if isinstance(entry, dict):
-                merged[str(key)] = _coerce_quran_entry(entry, str(key))
-    elif isinstance(primary, list):
-        for entry in primary:
+    for source in sources:
+        if isinstance(source, dict):
+            for key, entry in source.items():
+                if not isinstance(entry, dict):
+                    continue
+                key = str(key)
+                current = merged.get(key, {})
+                coerced = _coerce_quran_entry({**current, **entry}, key)
+                if key in merged:
+                    for field, value in coerced.items():
+                        if field == "raw":
+                            continue
+                        if value in {"", None}:
+                            continue
+                        merged[key][field] = value
+                else:
+                    merged[key] = coerced
+
+    # Ensure source TXT data wins over cache for arabic/translation text.
+    source_txt = _load_pipe_quran(QURAN_REFERENCE_SOURCE_PATH, translation_field="")
+    if isinstance(source_txt, dict):
+        for key, entry in source_txt.items():
             if not isinstance(entry, dict):
                 continue
-            key = entry.get("key") or entry.get("ref") or entry.get("verse_key")
-            if not key and "surah" in entry and "ayah" in entry:
-                key = _normalize_quran_key(entry["surah"], entry["ayah"])
-            if key:
-                merged[str(key)] = _coerce_quran_entry(entry, str(key))
+            merged.setdefault(key, _coerce_quran_entry({"key": key}, key))
+            merged[key]["arabic"] = str(entry.get("arabic", "") or "").strip()
 
-    if isinstance(translation, dict):
-        for key, entry in translation.items():
-            key = str(key)
-            if key not in merged:
-                merged[key] = _coerce_quran_entry({"key": key}, key)
-            if isinstance(entry, dict):
-                merged[key]["translation_id"] = str(
-                    entry.get("translation_id")
-                    or entry.get("translation")
-                    or entry.get("text")
-                    or ""
-                ).strip()
-            elif isinstance(entry, str):
-                merged[key]["translation_id"] = entry.strip()
+    translation_id_txt = _load_pipe_quran(QURAN_TRANSLATION_PATH, translation_field="translation_id")
+    if isinstance(translation_id_txt, dict):
+        for key, entry in translation_id_txt.items():
+            if not isinstance(entry, dict):
+                continue
+            merged.setdefault(key, _coerce_quran_entry({"key": key}, key))
+            merged[key]["translation_id"] = str(entry.get("translation_id", "") or "").strip()
+
+    translation_en_txt = _load_pipe_quran(QURAN_TRANSLATION_EN_PATH, translation_field="translation_en")
+    if isinstance(translation_en_txt, dict):
+        for key, entry in translation_en_txt.items():
+            if not isinstance(entry, dict):
+                continue
+            merged.setdefault(key, _coerce_quran_entry({"key": key}, key))
+            merged[key]["translation_en"] = str(entry.get("translation_en", "") or "").strip()
 
     return merged
 
@@ -166,11 +181,6 @@ def load_quran_reference() -> Dict[str, Dict]:
 def lookup_quran_entry(surah: int | str, ayah: int | str) -> Dict:
     key = _normalize_quran_key(surah, ayah)
     local = load_quran_reference().get(key)
-    if local and local.get("arabic"):
-        return local
-    online = _fetch_quran_ayah_online(key)
-    if online:
-        return online
     return local or {}
 
 
@@ -252,13 +262,25 @@ def lookup_hadith_entry(collection: str, number: str) -> Dict:
 def format_quran(entry: Dict, mode: str = "ar") -> str:
     arabic = str(entry.get("arabic", "") or "").strip()
     translation = str(entry.get("translation_id", "") or "").strip()
+    translation_en = str(entry.get("translation_en", "") or "").strip()
     mode = (mode or "ar").lower()
     if mode == "ar":
         return arabic
     if mode == "id":
         return translation
+    if mode == "en":
+        return translation_en
     if mode in {"ar+id", "id+ar"}:
         parts = [part for part in [arabic, translation] if part]
+        return "\n\n".join(parts).strip()
+    if mode in {"ar+en", "en+ar"}:
+        parts = [part for part in [arabic, translation_en] if part]
+        return "\n\n".join(parts).strip()
+    if mode in {"id+en", "en+id"}:
+        parts = [part for part in [translation, translation_en] if part]
+        return "\n\n".join(parts).strip()
+    if mode in {"ar+id+en", "ar+en+id", "id+ar+en", "id+en+ar", "en+ar+id", "en+id+ar"}:
+        parts = [part for part in [arabic, translation, translation_en] if part]
         return "\n\n".join(parts).strip()
     return arabic
 

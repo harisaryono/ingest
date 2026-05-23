@@ -30,13 +30,21 @@ REFERENCE_DATA_DIR = os.getenv(
     "REFERENCE_DATA_DIR",
     os.path.join(DATABASE_DIR, "reference_data"),
 )
+QURAN_REFERENCE_SOURCE_PATH = os.getenv(
+    "QURAN_REFERENCE_SOURCE_PATH",
+    os.path.join(DATABASE_DIR, "quran-uthmani.txt"),
+)
 QURAN_REFERENCE_PATH = os.getenv(
     "QURAN_REFERENCE_PATH",
     os.path.join(REFERENCE_DATA_DIR, "quran", "quran-uthmani.json"),
 )
 QURAN_TRANSLATION_PATH = os.getenv(
     "QURAN_TRANSLATION_PATH",
-    os.path.join(REFERENCE_DATA_DIR, "quran", "translation-id.json"),
+    os.path.join(DATABASE_DIR, "id.indonesian.txt"),
+)
+QURAN_TRANSLATION_EN_PATH = os.getenv(
+    "QURAN_TRANSLATION_EN_PATH",
+    os.path.join(DATABASE_DIR, "en.sahih.txt"),
 )
 HADITH_REFERENCE_DIR = os.getenv(
     "HADITH_REFERENCE_DIR",
