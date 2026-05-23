@@ -1286,15 +1286,6 @@ textarea:focus,input[type="text"]:focus{{border-color:rgba(120,215,255,.4);box-s
           </label>
         </div>
         <div class="group">
-          <div class="label">Cari hadits di Dorar</div>
-          <div style="display:flex;gap:8px;flex-wrap:wrap;">
-            <input id="dorarQuery" type="text" placeholder="Contoh: إنما الأعمال بالنيات" style="flex:1 1 280px;">
-            <button id="searchDorar" type="button" class="secondary">Cari Dorar</button>
-          </div>
-          <div class="status">Klik kandidat untuk menyisipkan teks ke posisi cursor di editor halaman.</div>
-          <div id="dorarResults" class="readout" style="min-height:12vh;"></div>
-        </div>
-        <div class="group">
           <div class="label">Cari hadits lokal</div>
           <div style="display:flex;gap:8px;flex-wrap:wrap;">
             <input id="localHadithQuery" type="text" placeholder="Contoh: إنما الأعمال بالنيات" style="flex:1 1 260px;">
@@ -1303,6 +1294,15 @@ textarea:focus,input[type="text"]:focus{{border-color:rgba(120,215,255,.4);box-s
           </div>
           <div class="status">Pencarian lokal memakai dataset hadits yang sudah diimpor. Kosongkan koleksi untuk cari semua koleksi.</div>
           <div id="localHadithResults" class="readout" style="min-height:12vh;"></div>
+        </div>
+        <div class="group">
+          <div class="label">Cari hadits di Dorar</div>
+          <div style="display:flex;gap:8px;flex-wrap:wrap;">
+            <input id="dorarQuery" type="text" placeholder="Contoh: إنما الأعمال بالنيات" style="flex:1 1 280px;">
+            <button id="searchDorar" type="button" class="secondary">Cari Dorar</button>
+          </div>
+          <div class="status">Klik kandidat untuk menyisipkan teks ke posisi cursor di editor halaman.</div>
+          <div id="dorarResults" class="readout" style="min-height:12vh;"></div>
         </div>
         <div class="group">
           <div class="label">Preview hasil marker</div>

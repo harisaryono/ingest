@@ -77,6 +77,25 @@ HADITH_COLLECTION_ALIASES = {
     "forty_hadith_shah_waliullah": "shahwaliullah40",
     "shahwaliullah40": "shahwaliullah40",
 }
+HADITH_COLLECTION_PRIORITY = {
+    "bukhari": 0,
+    "muslim": 1,
+    "abudawud": 2,
+    "tirmidhi": 3,
+    "nasai": 4,
+    "ibnmajah": 5,
+    "malik": 6,
+    "ahmed": 7,
+    "darimi": 8,
+    "riyad_assalihin": 20,
+    "mishkat_almasabih": 21,
+    "bulugh_almaram": 22,
+    "aladab_almufrad": 23,
+    "shamail_muhammadiyah": 24,
+    "nawawi40": 30,
+    "qudsi40": 31,
+    "shahwaliullah40": 32,
+}
 
 
 def _load_json(path: str, default):
@@ -524,7 +543,15 @@ def search_local_hadith(query: str, limit: int = 10, collection: str = "") -> Li
                 )
             )
 
-    scored.sort(key=lambda item: (-item[0], item[1].get("collection", ""), item[1].get("number", ""), item[1].get("key", "")))
+    scored.sort(
+        key=lambda item: (
+            -item[0],
+            HADITH_COLLECTION_PRIORITY.get(str(item[1].get("collection", "") or ""), 100),
+            str(item[1].get("collection", "") or ""),
+            item[1].get("number", ""),
+            item[1].get("key", ""),
+        )
+    )
     results = [item[1] for item in scored[:limit]]
     return results
 
@@ -669,7 +696,12 @@ def apply_reference_markers(
             mode = "ar"
             if "::" in raw_query:
                 raw_query, mode = [part.strip() for part in raw_query.split("::", 1)]
-            candidates = search_dorar_candidates(raw_query, limit=dorar_limit)
+            local_candidates = search_local_hadith(raw_query, limit=dorar_limit)
+            candidates = local_candidates
+            search_source = "local"
+            if not candidates:
+                candidates = search_dorar_candidates(raw_query, limit=dorar_limit)
+                search_source = "dorar"
             dorar_candidates[raw_query] = candidates
             found += 1
 
@@ -687,13 +719,13 @@ def apply_reference_markers(
             if policy in {"first", "auto", "replace_first"} and candidates:
                 return _format_hadith_entry(candidates[0], mode=mode)
             if policy in {"candidates", "list"} and candidates:
-                unresolved.append({"type": "dorar", "query": raw_query, "marker": match.group(0), "candidates": candidates})
+                unresolved.append({"type": search_source, "query": raw_query, "marker": match.group(0), "candidates": candidates})
                 lines = [f"[[DORAR_CANDIDATES {raw_query}]]"]
                 for idx, cand in enumerate(candidates, start=1):
                     preview = cand.get("text", "")[:220].replace("\n", " ")
                     lines.append(f"{idx}. {preview}")
                 return "\n".join(lines)
-            unresolved.append({"type": "dorar", "query": raw_query, "marker": match.group(0), "candidates": candidates})
+            unresolved.append({"type": search_source, "query": raw_query, "marker": match.group(0), "candidates": candidates})
             return match.group(0)
 
         value = DORAR_RE.sub(repl, value)
