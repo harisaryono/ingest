@@ -1160,6 +1160,23 @@ h1{{margin:0;font-size:clamp(28px,5vw,44px);line-height:1.1}}
   background:#fff;
 }}
 .editor-body{{padding:18px;display:grid;gap:12px}}
+.tabs{{display:flex;flex-wrap:wrap;gap:8px;padding:0 18px 8px}}
+.tab-btn{{
+  border:1px solid var(--line);
+  border-radius:999px;
+  background:rgba(255,255,255,.03);
+  color:var(--text);
+  padding:9px 14px;
+  cursor:pointer;
+  font-weight:700;
+  font-size:13px;
+}}
+.tab-btn.active{{background:linear-gradient(135deg,var(--accent),var(--accent-2));color:#071018}}
+.tab-panels{{padding:0 18px 18px;display:grid;gap:12px}}
+.tab-panel{{display:none;gap:12px}}
+.tab-panel.active{{display:grid}}
+.panel-actions{{display:flex;flex-wrap:wrap;gap:8px;align-items:center}}
+.panel-actions .ghost{{border:1px solid var(--line);background:var(--panel-2);color:var(--text)}}
 textarea, input[type="text"]{{
   width:100%;
   border-radius:16px;
@@ -1248,76 +1265,100 @@ textarea:focus,input[type="text"]:focus{{border-color:rgba(120,215,255,.4);box-s
         </div>
       </div>
       <div class="editor-body">
-        <div class="group">
-          <div class="label">Isi halaman JSON</div>
-          <textarea id="pageContent">{html_lib.escape(page_content)}</textarea>
+        <div class="tabs" role="tablist" aria-label="Review tools">
+          <button class="tab-btn active" type="button" data-tab-btn="edit">Edit</button>
+          <button class="tab-btn" type="button" data-tab-btn="marker">Marker</button>
+          <button class="tab-btn" type="button" data-tab-btn="hadith">Hadits</button>
+          <button class="tab-btn" type="button" data-tab-btn="repair">Repair</button>
+          <button class="tab-btn" type="button" data-tab-btn="metadata">Metadata</button>
         </div>
-        <div class="group">
-          <div class="label">Catatan review</div>
-          <input id="reviewNote" type="text" value="{html_lib.escape(review_note)}" placeholder="Catatan singkat, misal: noise footer sudah dibuang">
-        </div>
-        <div class="group">
-          <div class="label">Permintaan repair draft</div>
-          <input id="repairInstruction" type="text" placeholder="Contoh: perbaiki Arabic yang rusak tanpa mengubah makna">
-        </div>
-        <div class="group">
-          <div class="label">Marker replacement</div>
-          <input id="markerHint" type="text" value="[[FIX_QS 5:41]] / [[FIX_HADITH bukhari:1]] / [[DELETE_START]]...[[DELETE_END]] / [[DORAR_SEARCH ...]]" readonly>
-        </div>
-        <div class="buttons">
-          <button id="savePage" type="button">Simpan halaman</button>
-          <button id="markReviewed" type="button">Halaman reviewed</button>
-          <button id="markPending" type="button" class="secondary">Halaman pending</button>
-          <button id="approveBook" type="button">Buku siap ingest</button>
-          <button id="duplicateBook" type="button" class="secondary">Tolak dobel</button>
-          <button id="deleteBook" type="button" class="danger">Hapus buku</button>
-        </div>
-        <div class="buttons">
-          <button id="repairLocal" type="button" class="secondary">Draft repair lokal</button>
-          <button id="repairLease" type="button" class="secondary">Draft repair lease</button>
-          <button id="applyDraft" type="button" class="secondary">Pakai draft</button>
-        </div>
-        <div class="buttons">
-          <button id="applyMarkers" type="button" class="secondary">Preview markers</button>
-          <button id="applyMarkerDraft" type="button" class="secondary">Pakai hasil marker</button>
-          <label style="display:inline-flex;align-items:center;gap:8px;color:var(--muted);font-size:13px;">
-            <input id="autoDorarFirst" type="checkbox">
-            Auto Dorar pertama
-          </label>
-        </div>
-        <div class="group">
-          <div class="label">Cari hadits lokal</div>
-          <div style="display:flex;gap:8px;flex-wrap:wrap;">
-            <input id="localHadithQuery" type="text" placeholder="Contoh: إنما الأعمال بالنيات" style="flex:1 1 260px;">
-            <input id="localHadithCollection" type="text" placeholder="Koleksi opsional: bukhari, muslim, nawawi40" style="flex:1 1 220px;">
-            <button id="searchLocalHadith" type="button" class="secondary">Cari Lokal</button>
-          </div>
-          <div class="status">Pencarian lokal memakai dataset hadits yang sudah diimpor. Kosongkan koleksi untuk cari semua koleksi.</div>
-          <div id="localHadithResults" class="readout" style="min-height:12vh;"></div>
-        </div>
-        <div class="group">
-          <div class="label">Cari hadits di Dorar</div>
-          <div style="display:flex;gap:8px;flex-wrap:wrap;">
-            <input id="dorarQuery" type="text" placeholder="Contoh: إنما الأعمال بالنيات" style="flex:1 1 280px;">
-            <button id="searchDorar" type="button" class="secondary">Cari Dorar</button>
-          </div>
-          <div class="status">Klik kandidat untuk menyisipkan teks ke posisi cursor di editor halaman.</div>
-          <div id="dorarResults" class="readout" style="min-height:12vh;"></div>
-        </div>
-        <div class="group">
-          <div class="label">Preview hasil marker</div>
-          <textarea id="markerOutput" class="draft" placeholder="Hasil preview marker replacement akan muncul di sini" readonly></textarea>
-          <div id="markerDiff" class="readout" style="min-height:12vh;">Belum ada preview marker.</div>
+
+        <div class="tab-panels">
+          <section class="tab-panel active" data-tab-panel="edit">
+            <div class="group">
+              <div class="label">Isi halaman JSON</div>
+              <textarea id="pageContent">{html_lib.escape(page_content)}</textarea>
+            </div>
+            <div class="group">
+              <div class="label">Catatan review</div>
+              <input id="reviewNote" type="text" value="{html_lib.escape(review_note)}" placeholder="Catatan singkat, misal: noise footer sudah dibuang">
+            </div>
+            <div class="panel-actions">
+              <button id="savePage" type="button">Simpan halaman</button>
+              <button id="markReviewed" type="button">Halaman reviewed</button>
+              <button id="markPending" type="button" class="secondary">Halaman pending</button>
+              <button id="approveBook" type="button">Buku siap ingest</button>
+              <button id="duplicateBook" type="button" class="secondary">Tolak dobel</button>
+              <button id="deleteBook" type="button" class="danger">Hapus buku</button>
+            </div>
+          </section>
+
+          <section class="tab-panel" data-tab-panel="marker">
+            <div class="group">
+              <div class="label">Marker replacement</div>
+              <input id="markerHint" type="text" value="[[FIX_QS 5:41]] / [[FIX_HADITH bukhari:1]] / [[DELETE_START]]...[[DELETE_END]] / [[DORAR_SEARCH ...]]" readonly>
+            </div>
+            <div class="panel-actions">
+              <button id="applyMarkers" type="button" class="secondary">Preview markers</button>
+              <button id="applyMarkerDraft" type="button" class="secondary">Pakai hasil marker</button>
+              <label style="display:inline-flex;align-items:center;gap:8px;color:var(--muted);font-size:13px;">
+                <input id="autoDorarFirst" type="checkbox">
+                Auto Dorar pertama
+              </label>
+            </div>
+            <div class="group">
+              <div class="label">Preview hasil marker</div>
+              <textarea id="markerOutput" class="draft" placeholder="Hasil preview marker replacement akan muncul di sini" readonly></textarea>
+              <div id="markerDiff" class="readout" style="min-height:12vh;">Belum ada preview marker.</div>
+            </div>
+          </section>
+
+          <section class="tab-panel" data-tab-panel="hadith">
+            <div class="group">
+              <div class="label">Cari hadits lokal</div>
+              <div style="display:flex;gap:8px;flex-wrap:wrap;">
+                <input id="localHadithQuery" type="text" placeholder="Contoh: إنما الأعمال بالنيات" style="flex:1 1 260px;">
+                <input id="localHadithCollection" type="text" placeholder="Koleksi opsional: bukhari, muslim, nawawi40" style="flex:1 1 220px;">
+                <button id="searchLocalHadith" type="button" class="secondary">Cari Lokal</button>
+              </div>
+              <div class="status">Pencarian lokal memakai dataset hadits yang sudah diimpor. Kosongkan koleksi untuk cari semua koleksi.</div>
+              <div id="localHadithResults" class="readout" style="min-height:12vh;"></div>
+            </div>
+            <div class="group">
+              <div class="label">Cari hadits di Dorar</div>
+              <div style="display:flex;gap:8px;flex-wrap:wrap;">
+                <input id="dorarQuery" type="text" placeholder="Contoh: إنما الأعمال بالنيات" style="flex:1 1 280px;">
+                <button id="searchDorar" type="button" class="secondary">Cari Dorar</button>
+              </div>
+              <div class="status">Klik kandidat untuk menyisipkan teks ke posisi cursor di editor halaman.</div>
+              <div id="dorarResults" class="readout" style="min-height:12vh;"></div>
+            </div>
+          </section>
+
+          <section class="tab-panel" data-tab-panel="repair">
+            <div class="group">
+              <div class="label">Permintaan repair draft</div>
+              <input id="repairInstruction" type="text" placeholder="Contoh: perbaiki Arabic yang rusak tanpa mengubah makna">
+            </div>
+            <div class="panel-actions">
+              <button id="repairLocal" type="button" class="secondary">Draft repair lokal</button>
+              <button id="repairLease" type="button" class="secondary">Draft repair lease</button>
+              <button id="applyDraft" type="button" class="secondary">Pakai draft</button>
+            </div>
+            <div class="group">
+              <div class="label">Draft perbaikan</div>
+              <textarea id="repairOutput" class="draft" placeholder="Hasil draft perbaikan akan muncul di sini"></textarea>
+            </div>
+          </section>
+
+          <section class="tab-panel" data-tab-panel="metadata">
+            <div class="group">
+              <div class="label">Review metadata</div>
+              <div class="readout">page_review_status: {html_lib.escape(page_review_status or '-')}\npage_reviewed_by: {html_lib.escape(page_reviewed_by or '-')}\npage_reviewed_at: {html_lib.escape(page_reviewed_at or '-')}\nbook_review_status: {html_lib.escape(book_review_status)}\nsource_path: {current_path}\nsource_type: {html_lib.escape(str(source_type))}\njson_path: {json_path}</div>
+            </div>
+          </section>
         </div>
         <div id="status" class="status">Siap review.</div>
-        <div class="group">
-          <div class="label">Draft perbaikan</div>
-          <textarea id="repairOutput" class="draft" placeholder="Hasil draft perbaikan akan muncul di sini"></textarea>
-        </div>
-        <div class="group">
-          <div class="label">Review metadata</div>
-          <div class="readout">page_review_status: {html_lib.escape(page_review_status or '-')}\npage_reviewed_by: {html_lib.escape(page_reviewed_by or '-')}\npage_reviewed_at: {html_lib.escape(page_reviewed_at or '-')}\nbook_review_status: {html_lib.escape(book_review_status)}\nsource_path: {current_path}\nsource_type: {html_lib.escape(str(source_type))}</div>
-        </div>
       </div>
     </section>
   </div>
@@ -1345,8 +1386,25 @@ textarea:focus,input[type="text"]:focus{{border-color:rgba(120,215,255,.4);box-s
   const autoDorarFirst = document.getElementById('autoDorarFirst');
   const status = document.getElementById('status');
   const pageJump = document.getElementById('pageJump');
+  const tabButtons = Array.from(document.querySelectorAll('[data-tab-btn]'));
+  const tabPanels = Array.from(document.querySelectorAll('[data-tab-panel]'));
+  const tabStorageKey = `review-tab:${bookId}:${pageNum}`;
   function setStatus(text) {{
     status.textContent = text;
+  }}
+  function activateTab(tabName) {{
+    const active = tabName || 'edit';
+    tabButtons.forEach(btn => {{
+      const isActive = (btn.dataset.tabBtn || '') === active;
+      btn.classList.toggle('active', isActive);
+    }});
+    tabPanels.forEach(panel => {{
+      const isActive = (panel.dataset.tabPanel || '') === active;
+      panel.classList.toggle('active', isActive);
+    }});
+    try {{
+      localStorage.setItem(tabStorageKey, active);
+    }} catch (err) {{}}
   }}
   function insertAtCursor(textarea, text) {{
     const start = textarea.selectionStart ?? textarea.value.length;
@@ -1472,6 +1530,7 @@ textarea:focus,input[type="text"]:focus{{border-color:rgba(120,215,255,.4);box-s
   async function runRepair(backend) {{
     const note = repairInstruction.value || '';
     setStatus('Membuat draft repair...');
+    activateTab('repair');
     const data = await postJson(`${{api}}/books/${{encodeURIComponent(bookId)}}/pages/${{pageNum}}/repair`, {{
       backend,
       instruction: note,
@@ -1541,6 +1600,7 @@ textarea:focus,input[type="text"]:focus{{border-color:rgba(120,215,255,.4);box-s
   }}
   async function previewMarkers() {{
     setStatus('Membuat preview marker...');
+    activateTab('marker');
     const data = await postJson(`${{api}}/books/${{encodeURIComponent(bookId)}}/pages/${{pageNum}}/apply-markers`, {{
       content: pageContent.value,
       dorar_policy: autoDorarFirst.checked ? 'first' : 'preserve',
@@ -1571,6 +1631,7 @@ textarea:focus,input[type="text"]:focus{{border-color:rgba(120,215,255,.4);box-s
       setStatus('Masukkan query Dorar dulu.');
       return;
     }}
+    activateTab('hadith');
     setStatus('Mencari Dorar...');
     const data = await postJson(`${{api}}/admin/hadith/dorar/search`, {{
       query,
@@ -1587,6 +1648,7 @@ textarea:focus,input[type="text"]:focus{{border-color:rgba(120,215,255,.4);box-s
       setStatus('Masukkan query hadits lokal dulu.');
       return;
     }}
+    activateTab('hadith');
     setStatus('Mencari hadits lokal...');
     const data = await postJson(`${{api}}/admin/hadith/local/search`, {{
       query,
@@ -1719,6 +1781,14 @@ textarea:focus,input[type="text"]:focus{{border-color:rgba(120,215,255,.4);box-s
   renderLocalHadithCandidates(currentLocalHadithMap);
   markerOutput.value = '';
   markerDiff.textContent = 'Belum ada preview marker.';
+  tabButtons.forEach(btn => {{
+    btn.addEventListener('click', () => activateTab(btn.dataset.tabBtn || 'edit'));
+  }});
+  try {{
+    activateTab(localStorage.getItem(tabStorageKey) || 'edit');
+  }} catch (err) {{
+    activateTab('edit');
+  }}
 }})();
 </script>
 </body>
@@ -2346,6 +2416,18 @@ def _render_library_html(page: int = 1, limit: int = 24, q: str = "", lang: str 
             badges.append("<span class='badge danger'>not ingest ready</span>")
         read_action = f'<a href="{first_reader}">Baca</a>' if first_reader else '<span class="disabled">Belum ada halaman</span>'
         review_action = f'<a class="secondary" href="{first_review}">Review</a>' if first_review else '<span class="disabled">Belum ada halaman</span>'
+        more_actions = f"""
+          <details class="book-more">
+            <summary>Aksi lain</summary>
+            <div class="book-actions compact">
+              <a class="secondary" href="{editor_url}">Edit JSON</a>
+              <a class="secondary" href="{raw_url}" target="_blank" rel="noreferrer">Raw JSON</a>
+              <button type="button" data-review-scope="book" data-review-action="approved_manual">Siap ingest</button>
+              <button type="button" class="secondary" data-review-scope="book" data-review-action="duplicate">Tolak dobel</button>
+              <button type="button" class="danger" data-review-scope="book" data-review-action="delete">Hapus</button>
+            </div>
+          </details>
+        """
         cards_html.append(
             f"""
             <article class="book-card" data-book-id="{html_lib.escape(str(book_id))}" data-search="{html_lib.escape(dataset).lower()}">
@@ -2361,11 +2443,7 @@ def _render_library_html(page: int = 1, limit: int = 24, q: str = "", lang: str 
                 <div class="book-actions">
                 {read_action}
                 {review_action}
-                <a class="secondary" href="{editor_url}">Edit JSON</a>
-                <a class="secondary" href="{raw_url}" target="_blank" rel="noreferrer">Raw JSON</a>
-                <button type="button" data-review-scope="book" data-review-action="approved_manual">Siap ingest</button>
-                <button type="button" class="secondary" data-review-scope="book" data-review-action="duplicate">Tolak dobel</button>
-                <button type="button" class="danger" data-review-scope="book" data-review-action="delete">Hapus</button>
+                {more_actions}
               </div>
             </article>
             """
@@ -2492,6 +2570,12 @@ h1{{margin:0;font-size:clamp(32px,6vw,58px);line-height:1}}
 .book-actions button.secondary{{background:var(--panel-2);color:var(--text);border:1px solid var(--line)}}
 .book-actions button.danger{{background:linear-gradient(135deg,#fda4af,#fecaca)}}
 .book-actions .disabled{{display:inline-flex;align-items:center;border-radius:12px;padding:10px 14px;color:var(--muted);border:1px dashed var(--line);background:rgba(255,255,255,.02)}}
+.book-more{{width:100%;margin-top:8px;border:1px solid var(--line);border-radius:16px;background:rgba(255,255,255,.02);overflow:hidden}}
+.book-more summary{{cursor:pointer;list-style:none;padding:10px 14px;font-weight:700;color:var(--text);user-select:none}}
+.book-more summary::-webkit-details-marker{{display:none}}
+.book-more[open] summary{{border-bottom:1px solid var(--line)}}
+.book-actions.compact{{justify-content:flex-start;padding:12px 14px}}
+.book-actions.compact a,.book-actions.compact button{{padding:9px 12px;font-size:13px}}
 .empty{{padding:22px;border:1px dashed var(--line);border-radius:18px;color:var(--muted);background:rgba(255,255,255,.02)}}
 @media (max-width: 820px){{
   .book-card{{grid-template-columns:1fr}}
