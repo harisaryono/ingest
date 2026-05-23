@@ -29,6 +29,7 @@ import re
 import shutil
 import subprocess
 import sys
+import signal
 import tempfile
 import unicodedata
 import zipfile
@@ -189,6 +190,26 @@ def write_jsonl(path: Path, entry: Dict) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     with path.open("a", encoding="utf-8") as f:
         f.write(json.dumps(entry, ensure_ascii=False) + "\n")
+
+
+class FileTimeoutError(TimeoutError):
+    pass
+
+
+def run_with_timeout(timeout_seconds: int, func, *args, **kwargs):
+    if timeout_seconds <= 0:
+        return func(*args, **kwargs)
+
+    def _alarm_handler(signum, frame):  # noqa: ARG001
+        raise FileTimeoutError(f"file processing exceeded {timeout_seconds}s")
+
+    previous_handler = signal.signal(signal.SIGALRM, _alarm_handler)
+    signal.setitimer(signal.ITIMER_REAL, timeout_seconds)
+    try:
+        return func(*args, **kwargs)
+    finally:
+        signal.setitimer(signal.ITIMER_REAL, 0)
+        signal.signal(signal.SIGALRM, previous_handler)
 
 
 def simhash(tokens: Iterable[str]) -> int:
@@ -360,27 +381,31 @@ def read_zip_xhtml_file(path: Path) -> List[str]:
     return [p for p in pages if p.strip()]
 
 
-def read_doc_with_libreoffice(path: Path) -> List[str]:
+def read_doc_with_libreoffice(path: Path, timeout_seconds: int | None = None) -> List[str]:
     if shutil.which("libreoffice") is None:
         raise RuntimeError("libreoffice not available for .doc fallback")
 
     with tempfile.TemporaryDirectory(prefix="islamhouse-lo-") as tmp:
         tmpdir = Path(tmp)
-        result = subprocess.run(
-            [
-                "libreoffice",
-                "--headless",
-                "--convert-to",
-                "html",
-                "--outdir",
-                str(tmpdir),
-                str(path),
-            ],
-            stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE,
-            text=True,
-            check=False,
-        )
+        try:
+            result = subprocess.run(
+                [
+                    "libreoffice",
+                    "--headless",
+                    "--convert-to",
+                    "html",
+                    "--outdir",
+                    str(tmpdir),
+                    str(path),
+                ],
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                text=True,
+                check=False,
+                timeout=timeout_seconds,
+            )
+        except subprocess.TimeoutExpired as e:
+            raise FileTimeoutError(f"LibreOffice conversion timed out for {path.name}") from e
         html_files = sorted(tmpdir.glob("*.html"))
         if result.returncode != 0 or not html_files:
             raise RuntimeError(
@@ -480,7 +505,7 @@ def analyze_quality(pages: List[str], language: str, path: Path, extractor: str,
     }
 
 
-def extract_pages(path: Path) -> Tuple[List[str], str]:
+def extract_pages(path: Path, timeout_seconds: int | None = None) -> Tuple[List[str], str]:
     ext = path.suffix.lower()
     if ext == ".txt":
         return read_text_file(path), "txt"
@@ -493,7 +518,7 @@ def extract_pages(path: Path) -> Tuple[List[str], str]:
     if ext in {".epub", ".ibooks"}:
         return read_zip_xhtml_file(path), "zip-xhtml"
     if ext == ".doc":
-        return read_doc_with_libreoffice(path), "libreoffice-html"
+        return read_doc_with_libreoffice(path, timeout_seconds=timeout_seconds), "libreoffice-html"
     raise RuntimeError(f"Unsupported extension: {ext}")
 
 
@@ -676,8 +701,9 @@ def process_file(
     catalog: List[Dict],
     threshold: float,
     keep_duplicates: bool,
+    file_timeout_seconds: int,
 ) -> Tuple[Optional[Dict], Optional[Dict], Optional[Dict], str]:
-    pages, extractor = extract_pages(path)
+    pages, extractor = extract_pages(path, timeout_seconds=file_timeout_seconds)
     if not pages:
         return None, None, None, extractor
 
@@ -853,6 +879,7 @@ def main() -> None:
     parser.add_argument("--keep-suspect", action="store_true", help="legacy flag; suspect books are still written but remain pending review")
     parser.add_argument("--duplicate-threshold", type=float, default=0.92, help="page overlap threshold for duplicate detection")
     parser.add_argument("--limit", type=int, default=0, help="process at most N files for testing")
+    parser.add_argument("--file-timeout-seconds", type=int, default=int(os.getenv("IMPORT_FILE_TIMEOUT_SECONDS", "600")), help="skip a file if processing exceeds this many seconds")
     parser.add_argument("--skip-canonicalize", action="store_true", help="skip post-import family canonicalization")
     parser.add_argument("--no-prune-qdrant", action="store_true", help="keep Qdrant state untouched when canonicalizing")
     args = parser.parse_args()
@@ -875,6 +902,7 @@ def main() -> None:
     log(f"Files discovered : {len(files)}")
     log(f"Existing books   : {len(index.get('files', []))}")
     log(f"Catalog entries  : {len(catalog)}")
+    log(f"File timeout     : {args.file_timeout_seconds}s")
 
     processed = 0
     imported = 0
@@ -887,14 +915,37 @@ def main() -> None:
     for i, path in enumerate(files, 1):
         processed += 1
         try:
-            book_json, duplicate_of, dup_info, extractor = process_file(
-                path=path,
-                input_dir=input_dir,
-                source_label=args.source_label,
-                catalog=catalog,
-                threshold=args.duplicate_threshold,
-                keep_duplicates=args.keep_duplicates,
+            book_json, duplicate_of, dup_info, extractor = run_with_timeout(
+                args.file_timeout_seconds,
+                process_file,
+                path,
+                input_dir,
+                args.source_label,
+                catalog,
+                args.duplicate_threshold,
+                args.keep_duplicates,
+                args.file_timeout_seconds,
             )
+        except FileTimeoutError as e:
+            unsupported += 1
+            write_jsonl(
+                QUALITY_REPORT_PATH,
+                {
+                    "kind": "timeout",
+                    "source_path": str(path.resolve()),
+                    "source_relpath": path.relative_to(input_dir).as_posix(),
+                    "filename": path.name,
+                    "source_ext": path.suffix.lower(),
+                    "source_type": source_type_from_path(path),
+                    "document_type": "html_document" if source_type_from_path(path) == "html" else "book",
+                    "status": "skipped",
+                    "reason": "file_processing_timeout",
+                    "timeout_seconds": args.file_timeout_seconds,
+                    "error": str(e),
+                },
+            )
+            log(f"[{i:04d}] TIMEOUT {path.name} skipped after {args.file_timeout_seconds}s")
+            continue
         except Exception as e:
             unsupported += 1
             log(f"[{i:04d}] ERROR  {path.name}: {e}")
