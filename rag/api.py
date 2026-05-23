@@ -1379,10 +1379,17 @@ textarea:focus,input[type="text"]:focus{{border-color:rgba(120,215,255,.4);box-s
         const text = escapeInline(item.text || '');
         const source = escapeInline(item.source || '');
         const grade = escapeInline(item.grade || '');
+        const exactMatch = !!item.exact_match;
+        const exactReason = escapeInline(item.exact_reason || '');
         const isSelected = idx === selectedIndex;
         return `
           <div style="border-top:1px solid var(--line);padding-top:10px;margin-top:10px;">
-            <div style="font-size:12px;color:var(--muted);margin-bottom:6px;">#${{idx + 1}} ${{source ? `· ${{source}}` : ''}} ${{grade ? `· ${{grade}}` : ''}}</div>
+            <div style="font-size:12px;color:var(--muted);margin-bottom:6px;display:flex;gap:8px;flex-wrap:wrap;align-items:center;">
+              <span>#${{idx + 1}}</span>
+              ${{source ? `<span>· ${{source}}</span>` : ''}}
+              ${{grade ? `<span>· ${{grade}}</span>` : ''}}
+              ${{exactMatch ? `<span style="padding:2px 8px;border-radius:999px;background:rgba(34,197,94,.16);color:#22c55e;font-size:11px;font-weight:700;">Exact match${{exactReason ? ` · ${{exactReason}}` : ''}}</span>` : ''}}
+            </div>
             <div style="white-space:pre-wrap;line-height:1.6;">${{text || '(kosong)'}} </div>
             <div class="buttons" style="margin-top:8px;">
               <button type="button" class="secondary" data-insert-dorar="${{encodeURIComponent(query)}}" data-index="${{idx}}">Sisipkan</button>
