@@ -296,7 +296,8 @@ async function searchBooks(){
       const pageStart = p.page_start ?? '?';
       const pageEnd = p.page_end ?? '?';
       const pageLabel = pageStart === pageEnd ? `${pageStart}` : `${pageStart}–${pageEnd}`;
-      const sourceLink = `/books/${encodeURIComponent(p.book_id || '')}/pages/${encodeURIComponent(pageStart)}/view?q=${encodeURIComponent(q)}`;
+      const sourceLink = `/sources/${encodeURIComponent(p.book_id || '')}/pages/${encodeURIComponent(pageStart)}?q=${encodeURIComponent(q)}`;
+      const reviewLink = `/books/${encodeURIComponent(p.book_id || '')}/pages/${encodeURIComponent(pageStart)}/review?q=${encodeURIComponent(q)}`;
       return `
         <article class="result">
           <div class="result-head">
@@ -310,7 +311,8 @@ async function searchBooks(){
           </div>
           <div class="snippet">${formatSnippet(item.text || '', q)}</div>
           <div class="meta" style="margin-top:10px">
-            <a href="${sourceLink}" target="_blank" rel="noreferrer">Buka halaman sumber</a>
+            <a href="${sourceLink}" target="_blank" rel="noreferrer">Buka halaman sumber</a> ·
+            <a href="${reviewLink}" target="_blank" rel="noreferrer">Review halaman</a>
           </div>
         </article>
       `;

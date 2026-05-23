@@ -2,23 +2,33 @@ from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
 from fastapi.responses import JSONResponse, HTMLResponse
-from pydantic import BaseModel
-from typing import List, Dict
+from pydantic import BaseModel, Field
+from typing import List, Dict, Tuple
 from collections import Counter
 from datetime import datetime, timezone
+from functools import lru_cache
 import hashlib
 import json
 import os
 import re
 import unicodedata
 import html as html_lib
+import shutil
+import subprocess
+import tempfile
+import zipfile
+from pathlib import Path
 from urllib.parse import quote
 from qdrant_client import QdrantClient
+from bs4 import BeautifulSoup
+from docx import Document
+from pdfminer.high_level import extract_text as pdf_extract_text
 
 from config import JSON_DIR, QDRANT_PATH, COLLECTION_NAME, LEXICAL_INDEX_PATH
 import retriever as retriever_module
 from retriever import retrieve
-from generator import generate, extract_sources
+from generator import generate, extract_sources, generate_local, generate_remote
+from reference_replace import apply_reference_markers, search_dorar_candidates
 from ingest_common import (
     infer_conversion_status,
     infer_document_type,
@@ -535,6 +545,1055 @@ def _build_content_index_entry(book: Dict, record: Dict, json_path: str) -> Dict
     }
 
 
+def _resolve_source_path(record: Dict) -> str:
+    candidates = []
+    source_path = str(record.get("source_path", "") or "").strip()
+    if source_path:
+        candidates.append(source_path)
+
+    source_root = str(record.get("source_root", "") or "").strip()
+    source_relpath = str(record.get("source_relpath", "") or "").strip()
+    if source_root and source_relpath:
+        candidates.append(os.path.join(source_root, source_relpath))
+    if source_relpath:
+        candidates.append(source_relpath)
+    filename = str(record.get("filename", "") or "").strip()
+    if filename:
+        candidates.append(filename)
+
+    for candidate in candidates:
+        if candidate and os.path.exists(candidate):
+            return os.path.abspath(candidate)
+    return ""
+
+
+def _source_split_pages_from_text(text: str) -> List[str]:
+    if not text or not text.strip():
+        return []
+    pages = [page.strip() for page in text.split("\f")]
+    return [page for page in pages if page]
+
+
+def _source_html_to_pages(html_text: str) -> List[str]:
+    soup = BeautifulSoup(html_text, "lxml")
+    for tag in soup(["script", "style", "noscript"]):
+        tag.decompose()
+    text = soup.get_text("\n")
+    pages = _source_split_pages_from_text(text)
+    return pages or [text.strip()]
+
+
+def _source_read_text_file(path: Path) -> List[str]:
+    with path.open("r", encoding="utf-8", errors="replace") as f:
+        content = f.read()
+    pages = _source_split_pages_from_text(content)
+    return pages or [content.strip()]
+
+
+def _source_read_html_file(path: Path) -> List[str]:
+    return _source_html_to_pages(path.read_text(encoding="utf-8", errors="replace"))
+
+
+def _source_read_docx_file(path: Path) -> List[str]:
+    doc = Document(str(path))
+    pages: List[str] = []
+    current: List[str] = []
+
+    for para in doc.paragraphs:
+        text = para.text.strip()
+        if text:
+            current.append(text)
+        para_xml = para._p.xml
+        if ("w:type=\"page\"" in para_xml or "w:lastRenderedPageBreak" in para_xml) and current:
+            pages.append("\n".join(current).strip())
+            current = []
+
+    if current:
+        pages.append("\n".join(current).strip())
+
+    if not pages:
+        all_text = "\n".join(p.text.strip() for p in doc.paragraphs if p.text.strip())
+        return _source_split_pages_from_text(all_text) or [all_text.strip()]
+
+    return pages
+
+
+def _source_read_pdf_file(path: Path) -> List[str]:
+    text = pdf_extract_text(str(path))
+    pages = _source_split_pages_from_text(text)
+    return pages or [text.strip()]
+
+
+def _source_read_zip_xhtml_file(path: Path) -> List[str]:
+    pages: List[str] = []
+    with zipfile.ZipFile(path) as zf:
+        members = sorted(
+            name for name in zf.namelist()
+            if name.lower().endswith((".xhtml", ".html", ".htm"))
+        )
+        for name in members:
+            with zf.open(name) as handle:
+                raw = handle.read().decode("utf-8", errors="replace")
+            pages.extend(_source_html_to_pages(raw))
+    return [page for page in pages if page.strip()]
+
+
+def _source_read_doc_with_libreoffice(path: Path) -> List[str]:
+    if shutil.which("libreoffice") is None:
+        raise RuntimeError("libreoffice not available for .doc fallback")
+
+    with tempfile.TemporaryDirectory(prefix="rag-source-lo-") as tmp:
+        tmpdir = Path(tmp)
+        result = subprocess.run(
+            [
+                "libreoffice",
+                "--headless",
+                "--convert-to",
+                "html",
+                "--outdir",
+                str(tmpdir),
+                str(path),
+            ],
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+            check=False,
+        )
+        html_files = sorted(tmpdir.glob("*.html"))
+        if result.returncode != 0 or not html_files:
+            raise RuntimeError(
+                f"LibreOffice conversion failed for {path.name}: {result.stderr.strip() or result.stdout.strip()}"
+            )
+        html_text = html_files[0].read_text(encoding="utf-8", errors="replace")
+        pages = _source_html_to_pages(html_text)
+        return pages or [html_text.strip()]
+
+
+@lru_cache(maxsize=256)
+def _load_source_pages_cached(source_path: str, source_type: str, source_mtime_ns: int, source_size: int) -> Tuple[str, ...]:
+    path = Path(source_path)
+    if not path.exists():
+        return tuple()
+
+    source_type = (source_type or "").strip().lower()
+    try:
+        if source_type == "txt":
+            pages = _source_read_text_file(path)
+        elif source_type == "html":
+            pages = _source_read_html_file(path)
+        elif source_type == "docx":
+            pages = _source_read_docx_file(path)
+        elif source_type == "pdf":
+            pages = _source_read_pdf_file(path)
+        elif source_type in {"epub", "ibooks"}:
+            pages = _source_read_zip_xhtml_file(path)
+        elif source_type == "doc":
+            pages = _source_read_doc_with_libreoffice(path)
+        else:
+            suffix = path.suffix.lower()
+            if suffix == ".txt":
+                pages = _source_read_text_file(path)
+            elif suffix in {".htm", ".html"}:
+                pages = _source_read_html_file(path)
+            elif suffix == ".docx":
+                pages = _source_read_docx_file(path)
+            elif suffix == ".pdf":
+                pages = _source_read_pdf_file(path)
+            elif suffix in {".epub", ".ibooks"}:
+                pages = _source_read_zip_xhtml_file(path)
+            elif suffix == ".doc":
+                pages = _source_read_doc_with_libreoffice(path)
+            else:
+                pages = [path.read_text(encoding="utf-8", errors="replace").strip()]
+    except Exception:
+        return tuple()
+
+    return tuple(page for page in pages if page and page.strip())
+
+
+def _load_source_pages(record: Dict) -> Tuple[List[str], str, str]:
+    source_path = _resolve_source_path(record)
+    if not source_path:
+        return [], infer_source_type(record), ""
+
+    try:
+        stat = os.stat(source_path)
+        source_mtime_ns = int(stat.st_mtime_ns)
+        source_size = int(stat.st_size)
+    except OSError:
+        return [], infer_source_type(record), source_path
+
+    source_type = infer_source_type(record)
+    pages = list(_load_source_pages_cached(source_path, source_type, source_mtime_ns, source_size))
+    return pages, source_type, source_path
+
+
+def _source_page_text(record: Dict, page_num: int) -> Tuple[str, int, int, str, str]:
+    pages, source_type, source_path = _load_source_pages(record)
+    total_pages = len(pages)
+    if total_pages <= 0:
+        return "", max(1, int(page_num) or 1), 0, source_type, source_path
+    page_index = min(max(int(page_num) - 1, 0), total_pages - 1)
+    return pages[page_index], page_index + 1, total_pages, source_type, source_path
+
+
+def _build_source_nav_html(book_id: str, current_page: int, total_pages: int, theme: str, font_size: int, query: str, target: str = "/sources") -> str:
+    if total_pages <= 0:
+        return ""
+    nav_pages = _compact_page_nav({"total_pages": total_pages}, current_page)
+    items = []
+    last_num = None
+    query_param = quote(query)
+    for pnum in nav_pages:
+        if last_num is not None and pnum != last_num + 1:
+            items.append("<span class='toc-gap'>…</span>")
+        active = " active" if pnum == current_page else ""
+        items.append(
+            f"<a class='toc-item{active}' href='{target}/{quote(str(book_id))}/pages/{pnum}?theme={theme}&font={font_size}&q={query_param}'>{pnum}</a>"
+        )
+        last_num = pnum
+    return "".join(items)
+
+
+def _render_source_preview_html(record: Dict, book: Dict, page_num: int, theme: str = "dark", font_size: int = 18, query: str = "") -> str:
+    book_id = record.get("book_id") or os.path.splitext(record.get("filename", ""))[0]
+    title = book.get("title", record.get("title", "Tanpa judul"))
+    source_page_text, source_page_num, source_total_pages, source_type, source_path = _source_page_text(record, page_num)
+    theme = "light" if str(theme).lower() == "light" else "dark"
+    font_size = max(14, min(int(font_size or 18), 28))
+    body_bg = "#f7f5ef" if theme == "light" else "linear-gradient(180deg, #0b0f14 0%, #11161d 100%)"
+    card_bg = "linear-gradient(180deg, rgba(255,255,255,.97), rgba(247,244,236,.97))" if theme == "light" else "linear-gradient(180deg, rgba(22,27,34,.98), rgba(18,23,31,.98))"
+    text_color = "#1d2430" if theme == "light" else "#e6edf3"
+    muted_color = "#64748b" if theme == "light" else "#9fb0c3"
+    line_color = "rgba(15,23,42,.12)" if theme == "light" else "rgba(255,255,255,.08)"
+    panel2 = "#eef2f7" if theme == "light" else "#1f2630"
+    content_color = "#111827" if theme == "light" else "#eef3f7"
+    prev_page = source_page_num - 1 if source_page_num > 1 else None
+    next_page = source_page_num + 1 if source_page_num < source_total_pages else None
+    query_param = quote(query)
+    page_content_html = html_lib.escape(source_page_text or "").replace("\n", "<br>")
+    page_content_html = _highlight_terms_html(page_content_html, query)
+    if not page_content_html.strip():
+        page_content_html = "<span class='empty'>Tidak ada teks sumber pada halaman ini.</span>"
+    prev_link = f"<a class='secondary' href='/sources/{quote(str(book_id))}/pages/{prev_page}?theme={theme}&font={font_size}&q={query_param}'>Halaman sebelumnya</a>" if prev_page else ""
+    next_link = f"<a class='secondary' href='/sources/{quote(str(book_id))}/pages/{next_page}?theme={theme}&font={font_size}&q={query_param}'>Halaman berikutnya</a>" if next_page else ""
+    json_link = f"/books/{quote(str(book_id))}/pages/{source_page_num}/view?theme={theme}&font={font_size}&q={query_param}"
+    review_link = f"/books/{quote(str(book_id))}/pages/{source_page_num}/review?theme={theme}&font={font_size}&q={query_param}"
+    nav_html = _build_source_nav_html(book_id, source_page_num, source_total_pages, theme, font_size, query, target="/sources")
+    jump_html = f"""
+      <form class="jump" onsubmit="const p=this.page.value; if(!p) return false; window.location='/sources/{quote(str(book_id))}/pages/'+encodeURIComponent(p)+'?theme={theme}&font={font_size}&q={query_param}'; return false;">
+        <label for="jump-page">Lompat halaman</label>
+        <input id="jump-page" name="page" type="number" min="1" max="{source_total_pages}" value="{source_page_num}">
+        <button type="submit">Buka</button>
+      </form>
+    """
+    source_kind = "dokumen" if infer_document_type(record) == "html_document" else "buku"
+    source_note = "HTML article / dokumen web" if infer_document_type(record) == "html_document" else "Sumber asli"
+    if source_total_pages <= 0:
+        source_note = "Pratinjau sumber tidak tersedia"
+    elif source_total_pages <= 1 and infer_document_type(record) == "html_document":
+        source_note = "Dokumen HTML tanpa paginasi stabil"
+    page_counter = f"{source_page_num} / {source_total_pages}" if source_total_pages > 0 else f"{source_page_num}"
+    return """<!DOCTYPE html>
+<html lang="id">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>{title} - Sumber Halaman {page_num}</title>
+<style>
+:root {{
+  --bg:{body_bg};
+  --panel:{card_bg};
+  --text:{text_color};
+  --muted:{muted_color};
+  --line:{line_color};
+  --accent:#7dd3fc;
+}}
+* {{ box-sizing:border-box; }}
+html,body {{ margin:0; min-height:100%; }}
+body {{
+  font-family: ui-serif, Georgia, "Times New Roman", serif;
+  background: var(--bg);
+  color:var(--text);
+}}
+.wrap {{ max-width: 1020px; margin: 0 auto; padding: 26px 16px 44px; }}
+.card {{
+  background: {card_bg};
+  border:1px solid var(--line);
+  border-radius:24px;
+  box-shadow: 0 24px 70px rgba(0,0,0,.35);
+  overflow:hidden;
+}}
+.head {{ padding: 26px 26px 18px; border-bottom:1px solid var(--line); }}
+.eyebrow {{
+  color: var(--accent);
+  letter-spacing: .14em;
+  text-transform: uppercase;
+  font-size: 12px;
+  margin-bottom: 10px;
+}}
+h1 {{
+  margin:0 0 10px;
+  font-size: clamp(24px, 4vw, 38px);
+  line-height:1.15;
+  font-family: ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+}}
+.meta {{
+  display:flex;
+  flex-wrap:wrap;
+  gap:8px 12px;
+  color:var(--muted);
+  font-size: 13px;
+  line-height:1.5;
+}}
+.pill {{
+  border:1px solid var(--line);
+  border-radius:999px;
+  padding:5px 10px;
+  background: rgba(255,255,255,.03);
+}}
+.toolbar {{
+  display:flex;
+  flex-wrap:wrap;
+  gap:10px;
+  padding: 16px 26px;
+  border-bottom:1px solid var(--line);
+  background: rgba(255,255,255,.02);
+}}
+.toolbar a {{
+  text-decoration:none;
+  color:#071018;
+  background: linear-gradient(135deg, #7dd3fc, #a7f3d0);
+  border-radius: 12px;
+  padding: 10px 14px;
+  font-family: ui-sans-serif, system-ui, sans-serif;
+  font-size: 14px;
+  font-weight:700;
+}}
+.toolbar a.secondary {{
+  color: var(--text);
+  background: var(--panel2);
+  border:1px solid var(--line);
+}}
+.toolbar form.jump {{
+  display:flex;
+  flex-wrap:wrap;
+  gap:8px;
+  align-items:center;
+  margin-left:auto;
+  color: var(--muted);
+  font-family: ui-sans-serif, system-ui, sans-serif;
+  font-size: 13px;
+}}
+.toolbar form.jump input {{
+  width: 90px;
+  border-radius: 10px;
+  border:1px solid var(--line);
+  background: transparent;
+  color: var(--text);
+  padding: 9px 10px;
+  font-size: 14px;
+}}
+.toolbar form.jump button {{
+  border:none;
+  border-radius: 10px;
+  padding: 10px 14px;
+  background: linear-gradient(135deg, #7dd3fc, #a7f3d0);
+  color:#071018;
+  font-weight:700;
+  cursor:pointer;
+}}
+.content {{
+  padding: 28px 26px 34px;
+  font-size: {font_size}px;
+  line-height: 1.9;
+  white-space: pre-wrap;
+  word-break: break-word;
+  color: {content_color};
+  font-family: ui-serif, Georgia, "Times New Roman", serif;
+}}
+.content mark {{
+  background: rgba(120,215,255,.18);
+  color: inherit;
+  padding: 0 .14em;
+  border-radius: 4px;
+}}
+.footer {{
+  padding: 16px 26px 26px;
+  border-top:1px solid var(--line);
+  color:var(--muted);
+  font-size:13px;
+  font-family: ui-sans-serif, system-ui, sans-serif;
+}}
+.empty {{ color: var(--muted); }}
+.toc {{
+  display:flex;
+  flex-wrap:wrap;
+  gap:8px;
+  margin-top:10px;
+}}
+.toc-item {{
+  display:inline-flex;
+  align-items:center;
+  justify-content:center;
+  min-width: 34px;
+  padding: 7px 9px;
+  border-radius: 10px;
+  border:1px solid var(--line);
+  background: var(--panel2);
+  color: var(--text);
+  text-decoration:none;
+  font-size: 13px;
+  font-family: ui-sans-serif, system-ui, sans-serif;
+}}
+.toc-item.active {{
+  background: linear-gradient(135deg, #7dd3fc, #a7f3d0);
+  color:#071018;
+  font-weight:800;
+}}
+.toc-gap {{
+  color: var(--muted);
+  font-family: ui-sans-serif, system-ui, sans-serif;
+  font-size: 14px;
+  padding: 7px 2px;
+}}
+@media (max-width: 720px) {{
+  .toolbar form.jump {{ margin-left: 0; width: 100%; }}
+  .toolbar form.jump input {{ flex: 1 1 110px; }}
+}}
+</style>
+</head>
+<body>
+<div class="wrap">
+  <div class="card">
+    <div class="head">
+      <div class="eyebrow">Sumber Asli</div>
+      <h1>{title}</h1>
+      <div class="meta">
+        <span class="pill">Book ID: {book_id}</span>
+        <span class="pill">Halaman sumber {page_counter}</span>
+        <span class="pill">Jenis: {source_kind}</span>
+        <span class="pill">{source_note}</span>
+        <span class="pill">File: {filename}</span>
+      </div>
+    </div>
+    <div class="toolbar">
+      <a href="/books/{book_id}">Detail buku</a>
+      <a class="secondary" href="{json_link}">JSON halaman</a>
+      <a class="secondary" href="{review_link}">Review workspace</a>
+      <a class="secondary" href="/sources/{book_id}/pages/{source_page_num}?theme={theme}&font={font_size}&q={query_param}">Refresh</a>
+      <a class="secondary" href="/sources/{book_id}/pages/{source_page_num}?theme={theme_toggle}&font={font_size}&q={query_param}">Tema {theme_toggle}</a>
+      <a class="secondary" href="/sources/{book_id}/pages/{source_page_num}?theme={theme}&font={font_sm}&q={query_param}">A-</a>
+      <a class="secondary" href="/sources/{book_id}/pages/{source_page_num}?theme={theme}&font={font_md}&q={query_param}">A</a>
+      <a class="secondary" href="/sources/{book_id}/pages/{source_page_num}?theme={theme}&font={font_lg}&q={query_param}">A+</a>
+      {prev_link}
+      {next_link}
+      {jump_html}
+    </div>
+    <div class="content">{page_content_html}</div>
+    <div class="footer">
+      Sumber asli: {source_path}
+      <div class="toc">{nav_html}</div>
+    </div>
+  </div>
+</div>
+</body>
+</html>""".format(
+        title=html_lib.escape(str(title)),
+        book_id=html_lib.escape(str(book_id)),
+        page_num=page_num,
+        source_page_num=source_page_num,
+        source_total_pages=source_total_pages,
+        page_counter=html_lib.escape(str(page_counter)),
+        source_kind=html_lib.escape(str(source_kind)),
+        source_note=html_lib.escape(str(source_note)),
+        filename=html_lib.escape(str(record.get("filename", "-"))),
+        body_bg=body_bg,
+        card_bg=card_bg,
+        text_color=text_color,
+        muted_color=muted_color,
+        line_color=line_color,
+        panel2=panel2,
+        content_color=content_color,
+        theme=theme,
+        theme_toggle=("light" if theme == "dark" else "dark"),
+        font_size=font_size,
+        font_sm=max(14, font_size - 1),
+        font_md=font_size,
+        font_lg=min(28, font_size + 2),
+        query_param=query_param,
+        prev_link=prev_link,
+        next_link=next_link,
+        jump_html=jump_html,
+        page_content_html=page_content_html,
+        source_path=html_lib.escape(str(source_path or "-")),
+        json_link=json_link,
+        review_link=review_link,
+        nav_html=nav_html,
+    )
+
+
+def _render_page_review_html(record: Dict, book: Dict, page: Dict, page_num: int, theme: str = "dark", font_size: int = 18, q: str = "") -> str:
+    book_id = record.get("book_id") or os.path.splitext(record.get("filename", ""))[0]
+    title = book.get("title", record.get("title", "Tanpa judul"))
+    page_content = page.get("content", "")
+    source_page_text, source_page_num, source_total_pages, source_type, source_path = _source_page_text(record, page_num)
+    theme = "light" if str(theme).lower() == "light" else "dark"
+    font_size = max(14, min(int(font_size or 18), 28))
+    preview_url = f"/sources/{quote(str(book_id))}/pages/{source_page_num}?theme={theme}&font={font_size}&q={quote(q)}"
+    current_page = int(page.get("page", page_num) or page_num)
+    prev_page = current_page - 1 if current_page > 1 else None
+    next_page = current_page + 1 if current_page < int(book.get("total_pages", current_page) or current_page) else None
+    page_review_status = str(page.get("page_review_status", "") or "")
+    page_reviewed_by = str(page.get("page_reviewed_by", "") or "")
+    page_reviewed_at = str(page.get("page_reviewed_at", "") or "")
+    book_review_status = str(book.get("review_status", "approved_auto") or "approved_auto")
+    review_note = str(page.get("page_review_note", "") or "")
+    current_path = html_lib.escape(str(_resolve_source_path(record) or record.get("source_path", "") or ""))
+    json_path = html_lib.escape(str(record.get("json_path", "") or ""))
+    return f"""<!DOCTYPE html>
+<html lang="id">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Review Halaman - {html_lib.escape(str(title))}</title>
+<style>
+:root {{
+  --bg:#0f1115;
+  --panel:#161a22;
+  --panel-2:#1d2330;
+  --text:#eef2ff;
+  --muted:#9aa4b2;
+  --line:rgba(255,255,255,.08);
+  --accent:#78d7ff;
+  --accent-2:#a6ffcb;
+  --shadow:0 20px 60px rgba(0,0,0,.35);
+}}
+*{{box-sizing:border-box}}
+html,body{{margin:0;min-height:100%}}
+body{{
+  font-family:Inter,ui-sans-serif,system-ui,-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif;
+  color:var(--text);
+  background:
+    radial-gradient(circle at top left, rgba(120,215,255,.18), transparent 32%),
+    radial-gradient(circle at top right, rgba(166,255,203,.12), transparent 28%),
+    linear-gradient(180deg,#0b0d11 0%, #11151c 45%, #0b0d11 100%);
+}}
+.wrap{{max-width:1480px;margin:0 auto;padding:24px 18px 48px}}
+.hero{{
+  display:grid;
+  gap:16px;
+  padding:26px;
+  border:1px solid var(--line);
+  border-radius:24px;
+  background:linear-gradient(180deg, rgba(22,26,34,.95), rgba(17,21,28,.9));
+  box-shadow:var(--shadow);
+}}
+.eyebrow{{font-size:12px;letter-spacing:.16em;text-transform:uppercase;color:var(--accent)}}
+h1{{margin:0;font-size:clamp(28px,5vw,44px);line-height:1.1}}
+.lead{{margin:0;max-width:90ch;color:var(--muted);line-height:1.6;font-size:14px}}
+.stats{{display:flex;flex-wrap:wrap;gap:10px}}
+.pill{{border:1px solid var(--line);border-radius:999px;padding:8px 12px;background:rgba(255,255,255,.03);font-size:13px}}
+.toolbar{{display:flex;flex-wrap:wrap;gap:10px;align-items:center}}
+.toolbar a,.toolbar button{{
+  border-radius:14px;
+  border:none;
+  background:linear-gradient(135deg,var(--accent),var(--accent-2));
+  color:#071018;
+  font-weight:700;
+  padding:12px 16px;
+  cursor:pointer;
+  text-decoration:none;
+}}
+.toolbar a.secondary{{background:var(--panel-2);color:var(--text);border:1px solid var(--line)}}
+.toolbar input,.toolbar select{{
+  border-radius:14px;
+  border:1px solid var(--line);
+  background:rgba(255,255,255,.03);
+  color:var(--text);
+  padding:12px 14px;
+  font-size:14px;
+}}
+.workspace{{
+  display:grid;
+  grid-template-columns:minmax(0, 1.18fr) minmax(420px, .82fr);
+  gap:16px;
+  margin-top:18px;
+  align-items:start;
+}}
+.panel{{
+  border:1px solid var(--line);
+  border-radius:20px;
+  background:linear-gradient(180deg, rgba(255,255,255,.04), rgba(255,255,255,.02));
+  box-shadow:0 8px 30px rgba(0,0,0,.18);
+  overflow:hidden;
+}}
+.panel-head{{padding:16px 18px;border-bottom:1px solid var(--line);display:flex;justify-content:space-between;gap:10px;align-items:flex-start;flex-wrap:wrap}}
+.panel-head h2{{margin:0;font-size:16px}}
+.panel-head .small{{color:var(--muted);font-size:13px;line-height:1.5}}
+.preview-iframe{{
+  width:100%;
+  height: 76vh;
+  border:0;
+  background:#fff;
+}}
+.editor-body{{padding:18px;display:grid;gap:12px}}
+textarea, input[type="text"]{{
+  width:100%;
+  border-radius:16px;
+  border:1px solid var(--line);
+  background:rgba(0,0,0,.25);
+  color:var(--text);
+  padding:14px 16px;
+  font-size:14px;
+  outline:none;
+}}
+textarea{{min-height:42vh;resize:vertical;line-height:1.65;font-family:ui-monospace,SFMono-Regular,Menlo,Monaco,Consolas,"Liberation Mono","Courier New",monospace;}}
+textarea:focus,input[type="text"]:focus{{border-color:rgba(120,215,255,.4);box-shadow:0 0 0 4px rgba(120,215,255,.12)}}
+.group{{display:grid;gap:6px}}
+.label{{color:var(--muted);font-size:12px;letter-spacing:.08em;text-transform:uppercase}}
+.buttons{{display:flex;flex-wrap:wrap;gap:8px}}
+.buttons button,.buttons a{{
+  border-radius:12px;
+  border:none;
+  background:linear-gradient(135deg,var(--accent),var(--accent-2));
+  color:#071018;
+  font-weight:700;
+  padding:10px 14px;
+  cursor:pointer;
+  text-decoration:none;
+  font-size:13px;
+}}
+.buttons button.secondary,.buttons a.secondary{{background:var(--panel-2);color:var(--text);border:1px solid var(--line)}}
+.buttons button.danger,.buttons a.danger{{background:linear-gradient(135deg,#fda4af,#fecaca)}}
+.status{{color:var(--muted);font-size:13px;line-height:1.5}}
+.draft{{min-height:14vh}}
+.readout{{white-space:pre-wrap;font-family:ui-monospace,SFMono-Regular,Menlo,Monaco,Consolas,"Liberation Mono","Courier New",monospace;font-size:13px;line-height:1.6;padding:14px;border-radius:16px;border:1px solid var(--line);background:rgba(0,0,0,.18);color:#dfe9f7}}
+@media (max-width: 1140px){{
+  .workspace{{grid-template-columns:1fr}}
+  .preview-iframe{{height:58vh}}
+}}
+</style>
+</head>
+<body>
+<div class="wrap">
+  <section class="hero">
+    <div class="eyebrow">Review Halaman</div>
+    <h1>{html_lib.escape(str(title))}</h1>
+    <p class="lead">Panel kiri menampilkan sumber asli halaman, panel kanan menampilkan teks JSON yang bisa diedit langsung. Simpan edit akan menandai buku kembali sebagai pending review agar tidak langsung diingest.</p>
+    <div class="stats">
+      <div class="pill">Book ID: {html_lib.escape(str(book_id))}</div>
+      <div class="pill">Halaman: {current_page}</div>
+      <div class="pill">Review buku: {html_lib.escape(book_review_status)}</div>
+      <div class="pill">Review halaman: {html_lib.escape(page_review_status or '-')}</div>
+      <div class="pill">Sumber: {html_lib.escape(str(source_type))}</div>
+    </div>
+    <div class="toolbar">
+      <a href="/library">Daftar Buku</a>
+      <a class="secondary" href="/books/{quote(str(book_id))}/pages/{current_page}/view?theme={theme}&font={font_size}&q={quote(q)}">JSON halaman</a>
+      <a class="secondary" href="/sources/{quote(str(book_id))}/pages/{source_page_num}?theme={theme}&font={font_size}&q={quote(q)}">Buka sumber</a>
+      <a class="secondary" href="/books/{quote(str(book_id))}/edit">Edit JSON buku</a>
+      <a class="secondary" href="/books/{quote(str(book_id))}/raw" target="_blank" rel="noreferrer">Raw JSON</a>
+      <input id="pageJump" type="text" value="{current_page}" aria-label="Lompat halaman">
+      <button id="goPage" type="button">Buka halaman</button>
+    </div>
+  </section>
+
+  <div class="workspace">
+    <section class="panel">
+      <div class="panel-head">
+        <div>
+          <h2>Preview sumber asli</h2>
+          <div class="small">Path: {current_path}<br>JSON: {json_path}</div>
+        </div>
+        <div class="buttons">
+          <a class="secondary" href="{preview_url}" target="_blank" rel="noreferrer">Buka di tab baru</a>
+          <a class="secondary" href="/sources/{quote(str(book_id))}/pages/{source_page_num}?theme={theme}&font={font_size}&q={quote(q)}">Refresh sumber</a>
+        </div>
+      </div>
+      <iframe class="preview-iframe" src="{preview_url}" title="Preview sumber asli"></iframe>
+    </section>
+
+    <section class="panel">
+      <div class="panel-head">
+        <div>
+          <h2>Editor halaman</h2>
+          <div class="small">Edit isi halaman ini, lalu simpan. Setelah itu status akan kembali pending review.</div>
+        </div>
+        <div class="buttons">
+          <a class="secondary" href="/books/{quote(str(book_id))}/pages/{current_page}/view?theme={theme}&font={font_size}&q={quote(q)}">Baca JSON</a>
+          <a class="secondary" href="/books/{quote(str(book_id))}/pages/{current_page}/review?theme={theme}&font={font_size}&q={quote(q)}">Refresh</a>
+        </div>
+      </div>
+      <div class="editor-body">
+        <div class="group">
+          <div class="label">Isi halaman JSON</div>
+          <textarea id="pageContent">{html_lib.escape(page_content)}</textarea>
+        </div>
+        <div class="group">
+          <div class="label">Catatan review</div>
+          <input id="reviewNote" type="text" value="{html_lib.escape(review_note)}" placeholder="Catatan singkat, misal: noise footer sudah dibuang">
+        </div>
+        <div class="group">
+          <div class="label">Permintaan repair draft</div>
+          <input id="repairInstruction" type="text" placeholder="Contoh: perbaiki Arabic yang rusak tanpa mengubah makna">
+        </div>
+        <div class="group">
+          <div class="label">Marker replacement</div>
+          <input id="markerHint" type="text" value="[[FIX_QS 5:41]] / [[DELETE_START]]...[[DELETE_END]] / [[DORAR_SEARCH ...]]" readonly>
+        </div>
+        <div class="buttons">
+          <button id="savePage" type="button">Simpan halaman</button>
+          <button id="markReviewed" type="button">Halaman reviewed</button>
+          <button id="markPending" type="button" class="secondary">Halaman pending</button>
+          <button id="approveBook" type="button">Buku siap ingest</button>
+          <button id="duplicateBook" type="button" class="secondary">Tolak dobel</button>
+          <button id="deleteBook" type="button" class="danger">Hapus buku</button>
+        </div>
+        <div class="buttons">
+          <button id="repairLocal" type="button" class="secondary">Draft repair lokal</button>
+          <button id="repairLease" type="button" class="secondary">Draft repair lease</button>
+          <button id="applyDraft" type="button" class="secondary">Pakai draft</button>
+        </div>
+        <div class="buttons">
+          <button id="applyMarkers" type="button" class="secondary">Apply markers</button>
+          <label style="display:inline-flex;align-items:center;gap:8px;color:var(--muted);font-size:13px;">
+            <input id="autoDorarFirst" type="checkbox">
+            Auto Dorar pertama
+          </label>
+        </div>
+        <div class="group">
+          <div class="label">Cari hadits di Dorar</div>
+          <div style="display:flex;gap:8px;flex-wrap:wrap;">
+            <input id="dorarQuery" type="text" placeholder="Contoh: إنما الأعمال بالنيات" style="flex:1 1 280px;">
+            <button id="searchDorar" type="button" class="secondary">Cari Dorar</button>
+          </div>
+          <div class="status">Klik kandidat untuk menyisipkan teks ke posisi cursor di editor halaman.</div>
+          <div id="dorarResults" class="readout" style="min-height:12vh;"></div>
+        </div>
+        <div id="status" class="status">Siap review.</div>
+        <div class="group">
+          <div class="label">Draft perbaikan</div>
+          <textarea id="repairOutput" class="draft" placeholder="Hasil draft perbaikan akan muncul di sini"></textarea>
+        </div>
+        <div class="group">
+          <div class="label">Review metadata</div>
+          <div class="readout">page_review_status: {html_lib.escape(page_review_status or '-')}\npage_reviewed_by: {html_lib.escape(page_reviewed_by or '-')}\npage_reviewed_at: {html_lib.escape(page_reviewed_at or '-')}\nbook_review_status: {html_lib.escape(book_review_status)}\nsource_path: {current_path}\nsource_type: {html_lib.escape(str(source_type))}</div>
+        </div>
+      </div>
+    </section>
+  </div>
+</div>
+<script>
+(function() {{
+  const api = window.location.origin;
+  const bookId = {json.dumps(str(book_id))};
+  const pageNum = {int(current_page)};
+  const currentTheme = {json.dumps(theme)};
+  const currentFont = {int(font_size)};
+  const currentQuery = {json.dumps(q)};
+  const pageContent = document.getElementById('pageContent');
+  const reviewNote = document.getElementById('reviewNote');
+  const repairInstruction = document.getElementById('repairInstruction');
+  const repairOutput = document.getElementById('repairOutput');
+  const markerHint = document.getElementById('markerHint');
+  const dorarQuery = document.getElementById('dorarQuery');
+  const dorarResults = document.getElementById('dorarResults');
+  const autoDorarFirst = document.getElementById('autoDorarFirst');
+  const status = document.getElementById('status');
+  const pageJump = document.getElementById('pageJump');
+  function setStatus(text) {{
+    status.textContent = text;
+  }}
+  function insertAtCursor(textarea, text) {{
+    const start = textarea.selectionStart ?? textarea.value.length;
+    const end = textarea.selectionEnd ?? textarea.value.length;
+    const before = textarea.value.slice(0, start);
+    const after = textarea.value.slice(end);
+    textarea.value = `${{before}}${{text}}${{after}}`;
+    const pos = start + text.length;
+    textarea.focus();
+    textarea.selectionStart = pos;
+    textarea.selectionEnd = pos;
+  }}
+  function escapeInline(text) {{
+    return String(text || '')
+      .replaceAll('&', '&amp;')
+      .replaceAll('<', '&lt;')
+      .replaceAll('>', '&gt;')
+      .replaceAll('"', '&quot;')
+      .replaceAll("'", '&#39;');
+  }}
+  function renderDorarCandidates(map) {{
+    const entries = Object.entries(map || {{}});
+    if (!entries.length) {{
+      dorarResults.innerHTML = '<div class="empty">Belum ada hasil Dorar.</div>';
+      return;
+    }}
+    dorarResults.innerHTML = entries.map(([query, items]) => {{
+      const rows = (items || []).map((item, idx) => {{
+        const text = escapeInline(item.text || '');
+        const source = escapeInline(item.source || '');
+        const grade = escapeInline(item.grade || '');
+        return `
+          <div style="border-top:1px solid var(--line);padding-top:10px;margin-top:10px;">
+            <div style="font-size:12px;color:var(--muted);margin-bottom:6px;">#${{idx + 1}} ${{source ? `· ${{source}}` : ''}} ${{grade ? `· ${{grade}}` : ''}}</div>
+            <div style="white-space:pre-wrap;line-height:1.6;">${{text || '(kosong)'}} </div>
+            <div class="buttons" style="margin-top:8px;">
+              <button type="button" class="secondary" data-insert-dorar="${{encodeURIComponent(query)}}" data-index="${{idx}}">Sisipkan</button>
+            </div>
+          </div>
+        `;
+      }}).join('');
+      return `
+        <div style="margin-bottom:14px;">
+          <div style="font-weight:700;margin-bottom:6px;">${{escapeInline(query)}}</div>
+          <div style="color:var(--muted);font-size:13px;">${{items.length}} kandidat</div>
+          ${{rows}}
+        </div>
+      `;
+    }}).join('');
+    dorarResults.querySelectorAll('[data-insert-dorar]').forEach(btn => {{
+      btn.addEventListener('click', () => {{
+        const query = decodeURIComponent(btn.dataset.insertDorar || '');
+        const idx = parseInt(btn.dataset.index || '0', 10);
+        const entry = Object.entries(currentDorarMap).find(([k]) => k === query);
+        const items = entry ? entry[1] : [];
+        const item = items[idx];
+        if (!item) return;
+        insertAtCursor(pageContent, item.text || '');
+        setStatus(`Kandidat Dorar disisipkan untuk query: ${{query}}`);
+      }});
+    }});
+  }}
+  let currentDorarMap = {{}};
+  async function postJson(url, body) {{
+    const resp = await fetch(url, {{
+      method: 'POST',
+      headers: {{ 'Content-Type': 'application/json' }},
+      body: JSON.stringify(body)
+    }});
+    const data = await resp.json().catch(() => ({{}}));
+    if (!resp.ok) {{
+      throw new Error(data.detail || data.error || `HTTP ${{resp.status}}`);
+    }}
+    return data;
+  }}
+  async function savePage() {{
+    setStatus('Menyimpan halaman...');
+    const data = await postJson(`${{api}}/books/${{encodeURIComponent(bookId)}}/pages/${{pageNum}}/edit`, {{
+      content: pageContent.value,
+      reviewed_by: 'web',
+      note: reviewNote.value || ''
+    }});
+    setStatus(`Tersimpan. Review status: ${{data.review_status || 'pending_review'}}`);
+  }}
+  async function sendReview(action, scope, opts={{}}) {{
+    const data = await postJson(`${{api}}/books/${{encodeURIComponent(bookId)}}/review`, {{
+      scope,
+      action,
+      reviewed_by: opts.reviewed_by || 'web',
+      note: opts.note || '',
+      page_num: scope === 'page' ? pageNum : null,
+      promote_book: !!opts.promote_book,
+      delete_physical: !!opts.delete_physical,
+    }});
+    return data;
+  }}
+  async function runRepair(backend) {{
+    const note = repairInstruction.value || '';
+    setStatus('Membuat draft repair...');
+    const data = await postJson(`${{api}}/books/${{encodeURIComponent(bookId)}}/pages/${{pageNum}}/repair`, {{
+      backend,
+      instruction: note,
+      note,
+      reviewed_by: 'web'
+    }});
+    repairOutput.value = data.suggested_content || '';
+    setStatus(`Draft siap dari backend ${{data.backend_used || backend}}.`);
+  }}
+  async function applyMarkers() {{
+    setStatus('Menerapkan marker...');
+    const data = await postJson(`${{api}}/books/${{encodeURIComponent(bookId)}}/pages/${{pageNum}}/apply-markers`, {{
+      content: pageContent.value,
+      dorar_policy: autoDorarFirst.checked ? 'first' : 'preserve',
+      dorar_choices: {{}}
+    }});
+    pageContent.value = data.resolved_content || pageContent.value;
+    currentDorarMap = data.dorar_candidates || {{}};
+    renderDorarCandidates(currentDorarMap);
+    const unresolved = (data.unresolved || []).length;
+    setStatus(`Marker diterapkan. stages: ${{(data.stages || []).length}}, unresolved: ${{unresolved}}`);
+  }}
+  async function searchDorar() {{
+    const query = (dorarQuery.value || '').trim();
+    if (!query) {{
+      setStatus('Masukkan query Dorar dulu.');
+      return;
+    }}
+    setStatus('Mencari Dorar...');
+    const data = await postJson(`${{api}}/admin/hadith/dorar/search`, {{
+      query,
+      limit: 5
+    }});
+    currentDorarMap = {{ [query]: data.results || [] }};
+    renderDorarCandidates(currentDorarMap);
+    setStatus(`Dorar menemukan ${{(data.results || []).length}} kandidat untuk query: ${{query}}`);
+  }}
+  document.getElementById('savePage').addEventListener('click', async () => {{
+    try {{
+      await savePage();
+      window.location.reload();
+    }} catch (err) {{
+      setStatus(`Gagal menyimpan: ${{err.message}}`);
+    }}
+  }});
+  document.getElementById('markReviewed').addEventListener('click', async () => {{
+    try {{
+      setStatus('Menandai halaman reviewed...');
+      await sendReview('page_reviewed', 'page', {{ reviewed_by: 'web', note: reviewNote.value || '', promote_book: false }});
+      window.location.reload();
+    }} catch (err) {{
+      setStatus(`Gagal: ${{err.message}}`);
+    }}
+  }});
+  document.getElementById('markPending').addEventListener('click', async () => {{
+    try {{
+      setStatus('Menandai halaman pending...');
+      await sendReview('page_pending', 'page', {{ reviewed_by: 'web', note: reviewNote.value || '', promote_book: false }});
+      window.location.reload();
+    }} catch (err) {{
+      setStatus(`Gagal: ${{err.message}}`);
+    }}
+  }});
+  document.getElementById('approveBook').addEventListener('click', async () => {{
+    try {{
+      setStatus('Menandai buku siap ingest...');
+      await sendReview('approved_manual', 'book', {{ reviewed_by: 'web', note: reviewNote.value || '', promote_book: true }});
+      window.location.reload();
+    }} catch (err) {{
+      setStatus(`Gagal: ${{err.message}}`);
+    }}
+  }});
+  document.getElementById('duplicateBook').addEventListener('click', async () => {{
+    try {{
+      setStatus('Menandai duplikat...');
+      await sendReview('duplicate', 'book', {{ reviewed_by: 'web', note: reviewNote.value || 'duplicate', delete_physical: false }});
+      window.location.reload();
+    }} catch (err) {{
+      setStatus(`Gagal: ${{err.message}}`);
+    }}
+  }});
+  document.getElementById('deleteBook').addEventListener('click', async () => {{
+    if (!confirm('Hapus fisik JSON + hilangkan dari index/Qdrant?')) return;
+    try {{
+      setStatus('Menghapus buku...');
+      await sendReview('delete', 'book', {{ reviewed_by: 'web', note: reviewNote.value || '', delete_physical: true }});
+      window.location = '/library';
+    }} catch (err) {{
+      setStatus(`Gagal: ${{err.message}}`);
+    }}
+  }});
+  document.getElementById('repairLocal').addEventListener('click', async () => {{
+    try {{
+      await runRepair('local');
+    }} catch (err) {{
+      setStatus(`Repair gagal: ${{err.message}}`);
+    }}
+  }});
+  document.getElementById('repairLease').addEventListener('click', async () => {{
+    try {{
+      await runRepair('lease');
+    }} catch (err) {{
+      setStatus(`Repair gagal: ${{err.message}}`);
+    }}
+  }});
+  document.getElementById('applyDraft').addEventListener('click', async () => {{
+    if (!repairOutput.value.trim()) {{
+      setStatus('Draft masih kosong.');
+      return;
+    }}
+    if (!confirm('Ganti isi editor dengan draft perbaikan?')) return;
+    pageContent.value = repairOutput.value;
+    setStatus('Draft diterapkan ke editor.');
+  }});
+  document.getElementById('applyMarkers').addEventListener('click', async () => {{
+    try {{
+      await applyMarkers();
+    }} catch (err) {{
+      setStatus(`Apply marker gagal: ${{err.message}}`);
+    }}
+  }});
+  document.getElementById('searchDorar').addEventListener('click', async () => {{
+    try {{
+      await searchDorar();
+    }} catch (err) {{
+      setStatus(`Cari Dorar gagal: ${{err.message}}`);
+    }}
+  }});
+  document.getElementById('goPage').addEventListener('click', () => {{
+    const next = parseInt(pageJump.value, 10);
+    if (!Number.isFinite(next) || next < 1) return;
+    window.location = `/books/${{encodeURIComponent(bookId)}}/pages/${{next}}/review?theme=${{encodeURIComponent(currentTheme)}}&font=${{encodeURIComponent(currentFont)}}&q=${{encodeURIComponent(currentQuery)}}`;
+  }});
+  pageJump.addEventListener('keydown', (e) => {{
+    if (e.key === 'Enter') {{
+      document.getElementById('goPage').click();
+    }}
+  }});
+  currentDorarMap = {{}};
+  renderDorarCandidates(currentDorarMap);
+}})();
+</script>
+</body>
+</html>"""
+
+
+def _update_book_after_json_edit(
+    book_id: str,
+    record: Dict,
+    book: Dict,
+    json_path: str,
+    *,
+    release_indexed: bool = False,
+    extra_record_updates: Dict | None = None,
+) -> Dict:
+    index = _load_index()
+    idx_record = _find_index_record(index, book_id)
+    if not idx_record:
+        raise HTTPException(status_code=404, detail="index record not found")
+
+    updated_record = _apply_book_to_record(idx_record, book, json_path)
+    if extra_record_updates:
+        updated_record.update(extra_record_updates)
+    for i, existing in enumerate(index.get("files", [])):
+        existing_book_id = existing.get("book_id") or os.path.splitext(existing.get("filename", ""))[0]
+        if existing_book_id == book_id:
+            index["files"][i] = updated_record
+            break
+
+    _rebuild_index_summary(index)
+    _save_json_file(_index_path(), index)
+
+    content_index = _load_json_file(_content_index_path(), {"entries": [], "total_files": 0})
+    if isinstance(content_index, dict):
+        content_entry = _build_content_index_entry(book, updated_record, json_path)
+        content_index = _replace_content_index_entry(content_index, content_entry)
+        _save_json_file(_content_index_path(), content_index)
+
+    if release_indexed:
+        try:
+            client = QdrantClient(path=QDRANT_PATH)
+            state = load_state()
+            release_book(state, client, book_id)
+            save_state(state)
+        except Exception:
+            pass
+
+    _refresh_lexical_cache()
+    return updated_record
+
+
 def _render_page_html(record: Dict, book: Dict, page: Dict, page_num: int, theme: str = "dark", font_size: int = 19, query: str = "") -> str:
     title = book.get("title", "Tanpa judul")
     book_id = record.get("book_id") or os.path.splitext(record.get("filename", ""))[0]
@@ -566,6 +1625,8 @@ def _render_page_html(record: Dict, book: Dict, page: Dict, page_num: int, theme
     font_mobile = max(14, font_size - 1)
     max_pages = int(book.get("total_pages", page_start) or page_start)
     query_param = quote(query)
+    source_url = f"/sources/{quote(str(book_id))}/pages/{page_start}?theme={theme}&font={font_size}&q={query_param}"
+    review_url = f"/books/{quote(str(book_id))}/pages/{page_start}/review?theme={theme}&font={font_size}&q={query_param}"
     page_nav_items = []
     current_nav_pages = _compact_page_nav(book, page_start)
     last_num = None
@@ -598,6 +1659,7 @@ def _render_page_html(record: Dict, book: Dict, page: Dict, page_num: int, theme
           <button type="button" data-review-scope="book" data-review-action="approved_manual">Buku siap ingest</button>
           <button type="button" data-review-scope="book" data-review-action="duplicate">Tolak dobel</button>
           <button type="button" class="danger" data-review-scope="book" data-review-action="delete">Hapus buku</button>
+          <a class="secondary" href="{review_url}">Review workspace</a>
         </div>
       </div>
     """
@@ -753,7 +1815,8 @@ h1 {{
   flex-wrap:wrap;
   gap:8px;
 }}
-.reviewactions button {{
+.reviewactions button,
+.reviewactions a {{
   border:none;
   border-radius: 12px;
   padding: 10px 14px;
@@ -763,9 +1826,18 @@ h1 {{
   cursor:pointer;
   font-family: ui-sans-serif, system-ui, sans-serif;
   font-size: 13px;
+  text-decoration:none;
+  display:inline-flex;
+  align-items:center;
+  justify-content:center;
 }}
 .reviewactions button.danger {{
   background: linear-gradient(135deg, #fda4af, #fecaca);
+}}
+.reviewactions a.secondary {{
+  background: var(--panel2);
+  color: var(--text);
+  border:1px solid var(--line);
 }}
 .sidebar {{
   border-left:1px solid var(--line);
@@ -857,6 +1929,8 @@ h1 {{
       <div>
         <div class="toolbar">
           <a href="/books/{book_id}">Detail buku</a>
+          <a class="secondary" href="{source_url}">Buka halaman sumber</a>
+          <a class="secondary" href="{review_url}">Review workspace</a>
           <a class="secondary" href="/books/{book_id}/pages/{page_start}">JSON mentah</a>
           <a class="secondary" href="/books/{book_id}/pages/{page_start}/view?theme={theme_toggle}&font={font_size}&q={query_param}">Tema {theme_toggle}</a>
           <a class="secondary" href="/books/{book_id}/pages/{page_start}/view?theme={theme}&font={font_sm}&q={query_param}">A-</a>
@@ -968,6 +2042,8 @@ h1 {{
         font_mobile=font_mobile,
         query_param=query_param,
         jump_html=jump_html,
+        source_url=source_url,
+        review_url=review_url,
         book_id_js=book_id_js,
         prev_url_js=prev_url_js,
         next_url_js=next_url_js,
@@ -1013,7 +2089,8 @@ def _render_library_html() -> str:
         review_status = record.get("review_status", "approved_auto")
         ingest_ready = bool(record.get("ingest_ready", True))
         total_pages = int(record.get("total_pages", 0) or 0)
-        first_reader = f"/books/{quote(str(book_id))}/pages/1/view" if total_pages > 0 else ""
+        first_reader = f"/sources/{quote(str(book_id))}/pages/1" if total_pages > 0 else ""
+        first_review = f"/books/{quote(str(book_id))}/pages/1/review" if total_pages > 0 else ""
         editor_url = f"/books/{quote(str(book_id))}/edit"
         raw_url = f"/books/{quote(str(book_id))}/raw"
         dataset = " ".join([
@@ -1035,6 +2112,7 @@ def _render_library_html() -> str:
         if not ingest_ready:
             badges.append("<span class='badge danger'>not ingest ready</span>")
         read_action = f'<a href="{first_reader}">Baca</a>' if first_reader else '<span class="disabled">Belum ada halaman</span>'
+        review_action = f'<a class="secondary" href="{first_review}">Review</a>' if first_review else '<span class="disabled">Belum ada halaman</span>'
         cards_html.append(
             f"""
             <article class="book-card" data-book-id="{html_lib.escape(str(book_id))}" data-search="{html_lib.escape(dataset).lower()}">
@@ -1046,9 +2124,10 @@ def _render_library_html() -> str:
                   <span>{html_lib.escape(record.get('filename', '-'))}</span>
                 </div>
                 <div class="book-badges">{''.join(badges)}</div>
-              </div>
-              <div class="book-actions">
+                </div>
+                <div class="book-actions">
                 {read_action}
+                {review_action}
                 <a class="secondary" href="{editor_url}">Edit JSON</a>
                 <a class="secondary" href="{raw_url}" target="_blank" rel="noreferrer">Raw JSON</a>
                 <button type="button" data-review-scope="book" data-review-action="approved_manual">Siap ingest</button>
@@ -1400,7 +2479,7 @@ h1{{margin:0;font-size:clamp(28px,5vw,44px);line-height:1.1}}
     </div>
     <div class="toolbar">
       <a href="/library">Kembali ke daftar buku</a>
-      <a class="secondary" href="/books/{quote(str(book_id))}/pages/1/view">Baca buku</a>
+      <a class="secondary" href="/sources/{quote(str(book_id))}/pages/1">Baca buku</a>
       <a class="secondary" href="/books/{quote(str(book_id))}/raw" target="_blank" rel="noreferrer">Raw JSON</a>
       <button id="saveBtn" type="button">Simpan JSON</button>
     </div>
@@ -1476,6 +2555,30 @@ class RetrieveRequest(BaseModel):
 
 class JsonEditRequest(BaseModel):
     json_text: str
+
+
+class PageEditRequest(BaseModel):
+    content: str
+    reviewed_by: str = "web"
+    note: str = ""
+
+
+class PageRepairRequest(BaseModel):
+    backend: str = "local"
+    instruction: str = ""
+    note: str = ""
+    reviewed_by: str = "web"
+
+
+class PageMarkerApplyRequest(BaseModel):
+    content: str
+    dorar_policy: str = "preserve"
+    dorar_choices: Dict[str, int] = Field(default_factory=dict)
+
+
+class DorarSearchRequest(BaseModel):
+    query: str
+    limit: int = 5
 
 
 class ReviewActionRequest(BaseModel):
@@ -1726,39 +2829,27 @@ def book_edit_save(book_id: str, req: JsonEditRequest):
     merged_book["ingest_ready"] = False
 
     _save_json_file(json_path, merged_book)
-
-    index = _load_index()
-    idx_record = _find_index_record(index, book_id)
-    if not idx_record:
-        raise HTTPException(status_code=404, detail="index record not found")
-
-    updated_record = _apply_book_to_record(idx_record, merged_book, json_path)
-    updated_record["quality_status"] = merged_book.get("quality_status", updated_record.get("quality_status", "ok"))
-    updated_record["quality_reasons"] = merged_book.get("quality_reasons", updated_record.get("quality_reasons", []))
-    updated_record["quality_warnings"] = merged_book.get("quality_warnings", updated_record.get("quality_warnings", []))
-    updated_record["review_status"] = "pending_review"
-    updated_record["review_required"] = True
-    updated_record["review_route"] = "manual_or_lease_coordinator"
-    updated_record["reviewed_by"] = "web_editor"
-    updated_record["reviewed_at"] = now
-    updated_record["review_note"] = "edited via web editor"
-    updated_record["ingest_ready"] = False
-
-    for i, existing in enumerate(index.get("files", [])):
-        existing_book_id = existing.get("book_id") or os.path.splitext(existing.get("filename", ""))[0]
-        if existing_book_id == book_id:
-            index["files"][i] = updated_record
-            break
-
-    _rebuild_index_summary(index)
-    _save_json_file(_index_path(), index)
-
-    content_index = _load_json_file(_content_index_path(), {"entries": [], "total_files": 0})
-    content_entry = _build_content_index_entry(merged_book, updated_record, json_path)
-    content_index = _replace_content_index_entry(content_index, content_entry)
-    _save_json_file(_content_index_path(), content_index)
-
-    _refresh_lexical_cache()
+    extra_record_updates = {
+        "quality_status": merged_book.get("quality_status", record.get("quality_status", "ok")),
+        "quality_reasons": merged_book.get("quality_reasons", record.get("quality_reasons", [])),
+        "quality_warnings": merged_book.get("quality_warnings", record.get("quality_warnings", [])),
+        "review_status": "pending_review",
+        "review_required": True,
+        "review_route": "manual_or_lease_coordinator",
+        "reviewed_by": "web_editor",
+        "reviewed_at": now,
+        "review_note": "edited via web editor",
+        "ingest_ready": False,
+    }
+    updated_record = _update_book_after_json_edit(
+        book_id,
+        record,
+        merged_book,
+        json_path,
+        release_indexed=True,
+        extra_record_updates=extra_record_updates,
+    )
+    updated_record.update(extra_record_updates)
 
     return {
         "ok": True,
@@ -1928,6 +3019,246 @@ def page_content_view(book_id: str, page_num: int, theme: str = "dark", font: in
             query=q,
         )
     )
+
+
+@app.get("/sources/{book_id}/pages/{page_num}", response_class=HTMLResponse)
+def source_page_view(book_id: str, page_num: int, theme: str = "dark", font: int = 18, q: str = ""):
+    loaded = _load_book_record(book_id)
+    if not loaded:
+        return HTMLResponse("<h1>Not found</h1>", status_code=404)
+
+    record = loaded["record"]
+    book = loaded["book"]
+    page = _find_book_page(book, page_num)
+    if not page:
+        return HTMLResponse("<h1>Page not found</h1>", status_code=404)
+
+    return HTMLResponse(
+        _render_source_preview_html(
+            record,
+            book,
+            page_num,
+            theme=theme,
+            font_size=font,
+            query=q,
+        )
+    )
+
+
+@app.get("/books/{book_id}/pages/{page_num}/review", response_class=HTMLResponse)
+@app.get("/admin/books/{book_id}/pages/{page_num}/review", response_class=HTMLResponse)
+def page_review_workspace(book_id: str, page_num: int, theme: str = "dark", font: int = 18, q: str = ""):
+    loaded = _load_book_record(book_id)
+    if not loaded:
+        return HTMLResponse("<h1>Not found</h1>", status_code=404)
+
+    record = loaded["record"]
+    book = loaded["book"]
+    page = _find_book_page(book, page_num)
+    if not page:
+        return HTMLResponse("<h1>Page not found</h1>", status_code=404)
+
+    return HTMLResponse(
+        _render_page_review_html(
+            record,
+            book,
+            page,
+            page_num,
+            theme=theme,
+            font_size=font,
+            q=q,
+        )
+    )
+
+
+@app.post("/books/{book_id}/pages/{page_num}/edit")
+@app.post("/admin/books/{book_id}/pages/{page_num}/edit")
+def page_edit_save(book_id: str, page_num: int, req: PageEditRequest):
+    loaded = _load_book_record(book_id)
+    if not loaded:
+        raise HTTPException(status_code=404, detail="not found")
+
+    record = loaded["record"]
+    book = loaded["book"]
+    json_path = loaded["json_path"]
+    page = _find_book_page(book, page_num)
+    if not page:
+        raise HTTPException(status_code=404, detail="page not found")
+
+    now = datetime.now(timezone.utc).isoformat()
+    page["content"] = req.content
+    page["page_review_status"] = "pending_review"
+    page["page_reviewed_by"] = req.reviewed_by or "web"
+    page["page_reviewed_at"] = ""
+    page["page_review_note"] = req.note or "edited via web"
+
+    page_reviews = dict(book.get("page_reviews", {}))
+    page_reviews[str(page_num)] = {
+        "page": int(page_num),
+        "status": "pending_review",
+        "reviewed_by": req.reviewed_by or "web",
+        "reviewed_at": "",
+        "note": req.note or "edited via web",
+    }
+    book["page_reviews"] = page_reviews
+    book["review_status"] = "pending_review"
+    book["review_required"] = True
+    book["review_route"] = "manual_or_lease_coordinator"
+    book["reviewed_by"] = req.reviewed_by or "web"
+    book["reviewed_at"] = now
+    book["review_note"] = req.note or "edited via web"
+    book["ingest_ready"] = False
+
+    _save_json_file(json_path, book)
+
+    extra_record_updates = {
+        "page_review_status": "pending_review",
+        "page_reviewed_by": req.reviewed_by or "web",
+        "page_reviewed_at": "",
+        "page_review_note": req.note or "edited via web",
+        "review_status": "pending_review",
+        "review_required": True,
+        "review_route": "manual_or_lease_coordinator",
+        "reviewed_by": req.reviewed_by or "web",
+        "reviewed_at": now,
+        "review_note": req.note or "edited via web",
+        "ingest_ready": False,
+    }
+    updated_record = _update_book_after_json_edit(
+        book_id,
+        record,
+        book,
+        json_path,
+        release_indexed=True,
+        extra_record_updates=extra_record_updates,
+    )
+    updated_record.update(extra_record_updates)
+    index = _load_index()
+    for i, existing in enumerate(index.get("files", [])):
+        existing_book_id = existing.get("book_id") or os.path.splitext(existing.get("filename", ""))[0]
+        if existing_book_id == book_id:
+            index["files"][i] = updated_record
+            break
+    _rebuild_index_summary(index)
+    _save_json_file(_index_path(), index)
+
+    return {
+        "ok": True,
+        "book_id": book_id,
+        "page_num": page_num,
+        "review_status": book.get("review_status", "pending_review"),
+        "page_review_status": page["page_review_status"],
+        "ingest_ready": bool(book.get("ingest_ready", False)),
+    }
+
+
+@app.post("/books/{book_id}/pages/{page_num}/repair")
+@app.post("/admin/books/{book_id}/pages/{page_num}/repair")
+def page_repair_draft(book_id: str, page_num: int, req: PageRepairRequest):
+    loaded = _load_book_record(book_id)
+    if not loaded:
+        raise HTTPException(status_code=404, detail="not found")
+
+    record = loaded["record"]
+    book = loaded["book"]
+    page = _find_book_page(book, page_num)
+    if not page:
+        raise HTTPException(status_code=404, detail="page not found")
+
+    source_text, source_page_num, _, source_type, _source_path = _source_page_text(record, page_num)
+    current_text = page.get("content", "")
+    backend = str(req.backend or "local").strip().lower()
+    instruction = " ".join(part for part in [req.instruction, req.note] if part).strip()
+    prompt = f"""Anda adalah editor teks untuk buku agama.
+Tugas: perbaiki teks hasil ekstraksi/konversi pada halaman berikut tanpa mengubah makna.
+Jika teks sumber tidak cukup, pertahankan teks saat ini.
+Jangan menambah penjelasan.
+Kembalikan hanya teks final.
+
+Metadata:
+- Book ID: {record.get('book_id') or book_id}
+- Title: {book.get('title', record.get('title', ''))}
+- Halaman JSON: {page_num}
+- Halaman sumber: {source_page_num}
+- Source type: {source_type}
+- Instruction: {instruction or '-'}
+
+Teks sumber:
+{source_text[:8000]}
+
+Teks saat ini:
+{current_text[:8000]}
+"""
+
+    try:
+        if backend == "lease":
+            draft = generate_remote(prompt)
+            backend_used = "lease_coordinator"
+        elif backend == "large":
+            draft = generate_remote(prompt)
+            backend_used = "lease_coordinator"
+        else:
+            draft = generate_local(prompt)
+            backend_used = "ollama"
+    except Exception as exc:
+        raise HTTPException(status_code=502, detail=f"repair draft failed: {exc}") from exc
+
+    return {
+        "ok": True,
+        "book_id": book_id,
+        "page_num": page_num,
+        "backend_used": backend_used,
+        "suggested_content": draft,
+        "instruction": instruction,
+        "source_page_num": source_page_num,
+    }
+
+
+@app.post("/books/{book_id}/pages/{page_num}/apply-markers")
+@app.post("/admin/books/{book_id}/pages/{page_num}/apply-markers")
+def page_apply_markers(book_id: str, page_num: int, req: PageMarkerApplyRequest):
+    loaded = _load_book_record(book_id)
+    if not loaded:
+        raise HTTPException(status_code=404, detail="not found")
+
+    record = loaded["record"]
+    book = loaded["book"]
+    page = _find_book_page(book, page_num)
+    if not page:
+        raise HTTPException(status_code=404, detail="page not found")
+
+    result = apply_reference_markers(
+        req.content,
+        dorar_policy=req.dorar_policy,
+        dorar_choices=req.dorar_choices,
+    )
+    return {
+        "ok": True,
+        "book_id": book_id,
+        "page_num": page_num,
+        "resolved_content": result["resolved_text"],
+        "stages": result["stages"],
+        "unresolved": result["unresolved"],
+        "dorar_candidates": result["dorar_candidates"],
+        "quran_reference_path": result["quran_reference_path"],
+        "hadith_reference_dir": result["hadith_reference_dir"],
+        "source_path": record.get("source_path", ""),
+    }
+
+
+@app.post("/admin/hadith/dorar/search")
+def dorar_search(req: DorarSearchRequest):
+    query = (req.query or "").strip()
+    if not query:
+        raise HTTPException(status_code=400, detail="query is required")
+    limit = max(1, min(int(req.limit or 5), 10))
+    results = search_dorar_candidates(query, limit=limit)
+    return {
+        "ok": True,
+        "query": query,
+        "limit": limit,
+        "results": results,
+    }
 
 
 @app.post("/debug/retrieve")

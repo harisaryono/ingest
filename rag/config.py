@@ -26,6 +26,23 @@ COLLECTION_NAME = "buku_islam"
 VECTOR_DIM = 768
 
 JSON_DIR = os.path.join(DATABASE_DIR, "json_output")
+REFERENCE_DATA_DIR = os.getenv(
+    "REFERENCE_DATA_DIR",
+    os.path.join(DATABASE_DIR, "reference_data"),
+)
+QURAN_REFERENCE_PATH = os.getenv(
+    "QURAN_REFERENCE_PATH",
+    os.path.join(REFERENCE_DATA_DIR, "quran", "quran-uthmani.json"),
+)
+QURAN_TRANSLATION_PATH = os.getenv(
+    "QURAN_TRANSLATION_PATH",
+    os.path.join(REFERENCE_DATA_DIR, "quran", "translation-id.json"),
+)
+HADITH_REFERENCE_DIR = os.getenv(
+    "HADITH_REFERENCE_DIR",
+    os.path.join(REFERENCE_DATA_DIR, "hadith"),
+)
+DORAR_API_URL = os.getenv("DORAR_API_URL", "https://dorar.net/dorar_api.json")
 
 DEFAULT_TOP_K = 5
 RETRIEVAL_CANDIDATES = 20
