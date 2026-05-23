@@ -15,6 +15,10 @@ from dorar_client import search_dorar_hadith
 
 DELETE_BLOCK_RE = re.compile(r"\[\[DELETE_START\]\].*?\[\[DELETE_END\]\]", re.I | re.S)
 QURAN_RE = re.compile(r"\[\[(?:FIX_)?QS\s+(\d{1,3}):(\d{1,3})(?:\s+([a-z0-9+_-]+))?\]\]", re.I)
+DORAR_LOCAL_HADITH_RE = re.compile(
+    r"\[\[(?:FIX_HADITH|FIX_HADITH_LOCAL|HADITH)\s+([a-z0-9_.-]+)\s*:\s*([0-9a-zA-Z_.-]+)(?:\s+([a-z0-9+_-]+))?\]\]",
+    re.I | re.S,
+)
 DORAR_RE = re.compile(r"\[\[(?:DORAR_SEARCH|FIX_HADITH_DORAR|CANDIDATE_HADITH_DORAR)\s+(.+?)\]\]", re.I | re.S)
 QURAN_ONLINE_BASE = "https://api.alquran.cloud/v1"
 
@@ -211,6 +215,40 @@ def load_hadith_collection(collection: str) -> Dict:
     return {}
 
 
+def lookup_hadith_entry(collection: str, number: str) -> Dict:
+    collection = (collection or "").strip().lower()
+    number = str(number or "").strip()
+    if not collection or not number:
+        return {}
+    data = load_hadith_collection(collection)
+    if not data:
+        return {}
+
+    candidates = [
+        f"{collection}:{number}",
+        f"{collection}_{number}",
+        f"{collection}-{number}",
+        number,
+    ]
+    if number.isdigit():
+        candidates.insert(1, str(int(number)))
+
+    for key in candidates:
+        if key in data and isinstance(data[key], dict):
+            return data[key]
+
+    for item in data.values():
+        if not isinstance(item, dict):
+            continue
+        entry_key = str(item.get("key") or item.get("id") or item.get("number") or "").strip()
+        if entry_key in {number, f"{collection}:{number}", f"{collection}_{number}"}:
+            return item
+        item_number = str(item.get("number") or item.get("hadith_number") or item.get("no") or "").strip()
+        if item_number and item_number == number:
+            return item
+    return {}
+
+
 def format_quran(entry: Dict, mode: str = "ar") -> str:
     arabic = str(entry.get("arabic", "") or "").strip()
     translation = str(entry.get("translation_id", "") or "").strip()
@@ -301,6 +339,33 @@ def apply_reference_markers(
             stages.append({"type": "quran", "count": replaced})
         return value
 
+    def _replace_local_hadith(value: str) -> str:
+        replaced = 0
+
+        def repl(match):
+            nonlocal replaced
+            collection = (match.group(1) or "").strip().lower()
+            number = (match.group(2) or "").strip()
+            mode = (match.group(3) or "ar").lower()
+            entry = lookup_hadith_entry(collection, number)
+            if not entry:
+                unresolved.append(
+                    {
+                        "type": "hadith_local",
+                        "collection": collection,
+                        "number": number,
+                        "marker": match.group(0),
+                    }
+                )
+                return match.group(0)
+            replaced += 1
+            return _format_hadith_entry(entry, mode=mode)
+
+        value = DORAR_LOCAL_HADITH_RE.sub(repl, value)
+        if replaced:
+            stages.append({"type": "hadith_local", "count": replaced})
+        return value
+
     def _replace_dorar(value: str) -> str:
         found = 0
 
@@ -344,6 +409,7 @@ def apply_reference_markers(
 
     resolved = _delete_blocks(source_text)
     resolved = _replace_quran(resolved)
+    resolved = _replace_local_hadith(resolved)
     resolved = _replace_dorar(resolved)
 
     return {

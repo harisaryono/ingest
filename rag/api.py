@@ -3,6 +3,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
 from fastapi.responses import JSONResponse, HTMLResponse
 from pydantic import BaseModel, Field
+import difflib
 from typing import List, Dict, Tuple
 from collections import Counter
 from datetime import datetime, timezone
@@ -112,6 +113,27 @@ def _find_book_page(book: Dict, page_num: int) -> Dict | None:
         if p.get("page") == page_num:
             return p
     return None
+
+
+def _build_unified_diff(before: str, after: str, from_label: str = "before", to_label: str = "after", limit: int = 9000) -> str:
+    before_lines = (before or "").splitlines()
+    after_lines = (after or "").splitlines()
+    diff_lines = list(
+        difflib.unified_diff(
+            before_lines,
+            after_lines,
+            fromfile=from_label,
+            tofile=to_label,
+            lineterm="",
+            n=3,
+        )
+    )
+    if not diff_lines:
+        return "Tidak ada perubahan."
+    diff_text = "\n".join(diff_lines)
+    if len(diff_text) > limit:
+        diff_text = diff_text[:limit] + "\n... (diff dipotong)"
+    return diff_text
 
 
 def _normalize_signature_text(text: str) -> str:
@@ -1240,7 +1262,7 @@ textarea:focus,input[type="text"]:focus{{border-color:rgba(120,215,255,.4);box-s
         </div>
         <div class="group">
           <div class="label">Marker replacement</div>
-          <input id="markerHint" type="text" value="[[FIX_QS 5:41]] / [[DELETE_START]]...[[DELETE_END]] / [[DORAR_SEARCH ...]]" readonly>
+          <input id="markerHint" type="text" value="[[FIX_QS 5:41]] / [[FIX_HADITH bukhari:1]] / [[DELETE_START]]...[[DELETE_END]] / [[DORAR_SEARCH ...]]" readonly>
         </div>
         <div class="buttons">
           <button id="savePage" type="button">Simpan halaman</button>
@@ -1256,7 +1278,8 @@ textarea:focus,input[type="text"]:focus{{border-color:rgba(120,215,255,.4);box-s
           <button id="applyDraft" type="button" class="secondary">Pakai draft</button>
         </div>
         <div class="buttons">
-          <button id="applyMarkers" type="button" class="secondary">Apply markers</button>
+          <button id="applyMarkers" type="button" class="secondary">Preview markers</button>
+          <button id="applyMarkerDraft" type="button" class="secondary">Pakai hasil marker</button>
           <label style="display:inline-flex;align-items:center;gap:8px;color:var(--muted);font-size:13px;">
             <input id="autoDorarFirst" type="checkbox">
             Auto Dorar pertama
@@ -1270,6 +1293,11 @@ textarea:focus,input[type="text"]:focus{{border-color:rgba(120,215,255,.4);box-s
           </div>
           <div class="status">Klik kandidat untuk menyisipkan teks ke posisi cursor di editor halaman.</div>
           <div id="dorarResults" class="readout" style="min-height:12vh;"></div>
+        </div>
+        <div class="group">
+          <div class="label">Preview hasil marker</div>
+          <textarea id="markerOutput" class="draft" placeholder="Hasil preview marker replacement akan muncul di sini" readonly></textarea>
+          <div id="markerDiff" class="readout" style="min-height:12vh;">Belum ada preview marker.</div>
         </div>
         <div id="status" class="status">Siap review.</div>
         <div class="group">
@@ -1296,6 +1324,8 @@ textarea:focus,input[type="text"]:focus{{border-color:rgba(120,215,255,.4);box-s
   const reviewNote = document.getElementById('reviewNote');
   const repairInstruction = document.getElementById('repairInstruction');
   const repairOutput = document.getElementById('repairOutput');
+  const markerOutput = document.getElementById('markerOutput');
+  const markerDiff = document.getElementById('markerDiff');
   const markerHint = document.getElementById('markerHint');
   const dorarQuery = document.getElementById('dorarQuery');
   const dorarResults = document.getElementById('dorarResults');
@@ -1331,16 +1361,19 @@ textarea:focus,input[type="text"]:focus{{border-color:rgba(120,215,255,.4);box-s
       return;
     }}
     dorarResults.innerHTML = entries.map(([query, items]) => {{
+      const selectedIndex = Number.isInteger(currentDorarChoices[query]) ? currentDorarChoices[query] : -1;
       const rows = (items || []).map((item, idx) => {{
         const text = escapeInline(item.text || '');
         const source = escapeInline(item.source || '');
         const grade = escapeInline(item.grade || '');
+        const isSelected = idx === selectedIndex;
         return `
           <div style="border-top:1px solid var(--line);padding-top:10px;margin-top:10px;">
             <div style="font-size:12px;color:var(--muted);margin-bottom:6px;">#${{idx + 1}} ${{source ? `· ${{source}}` : ''}} ${{grade ? `· ${{grade}}` : ''}}</div>
             <div style="white-space:pre-wrap;line-height:1.6;">${{text || '(kosong)'}} </div>
             <div class="buttons" style="margin-top:8px;">
               <button type="button" class="secondary" data-insert-dorar="${{encodeURIComponent(query)}}" data-index="${{idx}}">Sisipkan</button>
+              <button type="button" class="${{isSelected ? 'primary' : 'secondary'}}" data-pick-dorar="${{encodeURIComponent(query)}}" data-index="${{idx}}">${{isSelected ? 'Terpilih' : 'Pilih kandidat'}}</button>
             </div>
           </div>
         `;
@@ -1348,7 +1381,7 @@ textarea:focus,input[type="text"]:focus{{border-color:rgba(120,215,255,.4);box-s
       return `
         <div style="margin-bottom:14px;">
           <div style="font-weight:700;margin-bottom:6px;">${{escapeInline(query)}}</div>
-          <div style="color:var(--muted);font-size:13px;">${{items.length}} kandidat</div>
+          <div style="color:var(--muted);font-size:13px;">${{items.length}} kandidat${{selectedIndex >= 0 ? ` · terpilih #${{selectedIndex + 1}}` : ''}}</div>
           ${{rows}}
         </div>
       `;
@@ -1365,8 +1398,23 @@ textarea:focus,input[type="text"]:focus{{border-color:rgba(120,215,255,.4);box-s
         setStatus(`Kandidat Dorar disisipkan untuk query: ${{query}}`);
       }});
     }});
+    dorarResults.querySelectorAll('[data-pick-dorar]').forEach(btn => {{
+      btn.addEventListener('click', async () => {{
+        const query = decodeURIComponent(btn.dataset.pickDorar || '');
+        const idx = parseInt(btn.dataset.index || '0', 10);
+        currentDorarChoices[query] = idx;
+        renderDorarCandidates(currentDorarMap);
+        setStatus(`Kandidat Dorar dipilih untuk query: ${{query}} (#${{idx + 1}}).`);
+        try {{
+          await previewMarkers();
+        }} catch (err) {{
+          setStatus(`Preview marker gagal: ${{err.message}}`);
+        }}
+      }});
+    }});
   }}
   let currentDorarMap = {{}};
+  let currentDorarChoices = {{}};
   async function postJson(url, body) {{
     const resp = await fetch(url, {{
       method: 'POST',
@@ -1412,18 +1460,40 @@ textarea:focus,input[type="text"]:focus{{border-color:rgba(120,215,255,.4);box-s
     repairOutput.value = data.suggested_content || '';
     setStatus(`Draft siap dari backend ${{data.backend_used || backend}}.`);
   }}
-  async function applyMarkers() {{
-    setStatus('Menerapkan marker...');
+  function renderMarkerPreview(data) {{
+    const resolved = data.resolved_content || '';
+    markerOutput.value = resolved;
+    const diffText = data.diff_text || 'Tidak ada diff.';
+    markerDiff.innerHTML = `
+      <div style="margin-bottom:8px;">${{escapeInline(data.diff_summary || 'Preview siap.')}}</div>
+      <pre style="white-space:pre-wrap;line-height:1.5;margin:0;">${{escapeInline(diffText)}}</pre>
+    `;
+  }}
+  async function previewMarkers() {{
+    setStatus('Membuat preview marker...');
     const data = await postJson(`${{api}}/books/${{encodeURIComponent(bookId)}}/pages/${{pageNum}}/apply-markers`, {{
       content: pageContent.value,
       dorar_policy: autoDorarFirst.checked ? 'first' : 'preserve',
-      dorar_choices: {{}}
+      dorar_choices: currentDorarChoices
     }});
-    pageContent.value = data.resolved_content || pageContent.value;
     currentDorarMap = data.dorar_candidates || {{}};
     renderDorarCandidates(currentDorarMap);
+    renderMarkerPreview(data);
     const unresolved = (data.unresolved || []).length;
-    setStatus(`Marker diterapkan. stages: ${{(data.stages || []).length}}, unresolved: ${{unresolved}}`);
+    setStatus(`Preview marker selesai. stages: ${{(data.stages || []).length}}, unresolved: ${{unresolved}}`);
+    return data;
+  }}
+  async function applyMarkers() {{
+    return await previewMarkers();
+  }}
+  function applyMarkerDraftToEditor() {{
+    if (!markerOutput.value.trim()) {{
+      setStatus('Preview marker masih kosong.');
+      return;
+    }}
+    if (!confirm('Pakai hasil preview marker ke editor halaman?')) return;
+    pageContent.value = markerOutput.value;
+    setStatus('Hasil preview marker sudah dipakai ke editor.');
   }}
   async function searchDorar() {{
     const query = (dorarQuery.value || '').trim();
@@ -1524,6 +1594,13 @@ textarea:focus,input[type="text"]:focus{{border-color:rgba(120,215,255,.4);box-s
       setStatus(`Apply marker gagal: ${{err.message}}`);
     }}
   }});
+  document.getElementById('applyMarkerDraft').addEventListener('click', async () => {{
+    try {{
+      applyMarkerDraftToEditor();
+    }} catch (err) {{
+      setStatus(`Pakai hasil marker gagal: ${{err.message}}`);
+    }}
+  }});
   document.getElementById('searchDorar').addEventListener('click', async () => {{
     try {{
       await searchDorar();
@@ -1542,7 +1619,10 @@ textarea:focus,input[type="text"]:focus{{border-color:rgba(120,215,255,.4);box-s
     }}
   }});
   currentDorarMap = {{}};
+  currentDorarChoices = {{}};
   renderDorarCandidates(currentDorarMap);
+  markerOutput.value = '';
+  markerDiff.textContent = 'Belum ada preview marker.';
 }})();
 </script>
 </body>
@@ -2608,13 +2688,17 @@ class SourceInfo(BaseModel):
 
 @app.get("/health")
 def health():
-    from qdrant_client import QdrantClient
-    try:
-        c = QdrantClient(path=QDRANT_PATH)
-        info = c.get_collection(COLLECTION_NAME)
-        qdrant_status = f"OK ({info.points_count} points)"
-    except Exception as e:
-        qdrant_status = f"ERROR: {e}"
+    storage_path = os.path.join(QDRANT_PATH, "collection", COLLECTION_NAME, "storage.sqlite")
+    state_path = os.path.join(QDRANT_PATH, "collection", COLLECTION_NAME)
+    qdrant_status = "unknown"
+    if os.path.exists(storage_path):
+        try:
+            size_mb = os.path.getsize(storage_path) / (1024 * 1024)
+            qdrant_status = f"present ({size_mb:.1f} MB)"
+        except Exception:
+            qdrant_status = "present"
+    elif os.path.exists(state_path):
+        qdrant_status = "present"
 
     return {
         "status": "ok",
@@ -3232,11 +3316,19 @@ def page_apply_markers(book_id: str, page_num: int, req: PageMarkerApplyRequest)
         dorar_policy=req.dorar_policy,
         dorar_choices=req.dorar_choices,
     )
+    diff_text = _build_unified_diff(req.content, result["resolved_text"], from_label="draft", to_label="resolved")
+    diff_summary = "Tidak ada perubahan."
+    if result["resolved_text"] != req.content:
+        before_lines = len((req.content or "").splitlines()) or (1 if req.content else 0)
+        after_lines = len((result["resolved_text"] or "").splitlines()) or (1 if result["resolved_text"] else 0)
+        diff_summary = f"Perubahan terdeteksi: {before_lines} baris → {after_lines} baris."
     return {
         "ok": True,
         "book_id": book_id,
         "page_num": page_num,
         "resolved_content": result["resolved_text"],
+        "diff_text": diff_text,
+        "diff_summary": diff_summary,
         "stages": result["stages"],
         "unresolved": result["unresolved"],
         "dorar_candidates": result["dorar_candidates"],
