@@ -503,8 +503,12 @@ def search_local_hadith(query: str, limit: int = 10, collection: str = "") -> Li
                 continue
 
             score = 0.0
+            exact_match = False
+            exact_reason = ""
             if normalized_query and normalized_query == entry_text:
                 score += 1000.0
+                exact_match = True
+                exact_reason = "teks"
             if normalized_query and normalized_query in entry_text:
                 score += 500.0
             if tokens:
@@ -516,14 +520,23 @@ def search_local_hadith(query: str, limit: int = 10, collection: str = "") -> Li
                 score += 20.0
             if parsed_number and number and parsed_number == number:
                 score += 160.0
+                exact_match = True
+                exact_reason = exact_reason or "nomor"
             if parsed_collection and coll == parsed_collection:
                 score += 25.0
             if query.isdigit() and number == query:
                 score += 140.0
+                exact_match = True
+                exact_reason = exact_reason or "nomor"
             if normalized_query and hadith_key and normalized_query == _normalize_search_text(hadith_key):
                 score += 150.0
+                exact_match = True
+                exact_reason = exact_reason or "kode"
             if normalized_query and hadith_key and normalized_query in _normalize_search_text(hadith_key):
                 score += 40.0
+            if parsed_collection and parsed_number and coll == parsed_collection and number == parsed_number:
+                exact_match = True
+                exact_reason = exact_reason or "koleksi+nomor"
             if score <= 0:
                 continue
 
@@ -538,6 +551,8 @@ def search_local_hadith(query: str, limit: int = 10, collection: str = "") -> Li
                         "text": preview or str(entry.get("arabic") or entry.get("translation_en") or entry.get("translation_id") or ""),
                         "source": _hadith_source_label(coll, entry),
                         "grade": str(entry.get("grade") or entry.get("hukm") or entry.get("verdict") or "").strip(),
+                        "exact_match": exact_match,
+                        "exact_reason": exact_reason,
                         "raw": entry,
                     },
                 )
