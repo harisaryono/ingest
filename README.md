@@ -32,6 +32,7 @@ Environment yang paling penting:
 - `DATABASE_DIR`
 - `OLLAMA_BASE`
 - `LEASE_COORDINATOR_URL`
+- `HADITH_JSON_SOURCE_DIR`
 - `INGEST_LANGUAGES`
 - `INGEST_LIMIT_BOOKS`
 - `INGEST_FORCE_REFRESH`
@@ -66,6 +67,26 @@ File yang mencurigakan tetap masuk JSON, tapi diberi status:
 - `ingest_ready=false`
 
 Supaya bisa diputuskan manual atau via lease coordinator.
+
+### 2b. Konversi referensi hadits lokal
+
+Jika Anda punya sumber `AhmedBaset/hadith-json`, jalankan converter ini untuk
+menyusun referensi hadits lokal yang dipakai marker replacement:
+
+```bash
+python3 rag/import_hadith_json.py \
+  --source-dir /tmp/hadith-json
+```
+
+Hasilnya akan ditulis ke:
+
+- `DATABASE/reference_data/hadith/by_book/`
+- `DATABASE/reference_data/hadith/index.json`
+
+Format ini dipakai oleh marker seperti:
+
+- `[[FIX_HADITH bukhari:1]]`
+- `[[FIX_HADITH muslim:1]]`
 
 ### 3. Approve / reject item review
 

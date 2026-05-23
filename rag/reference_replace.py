@@ -192,6 +192,8 @@ def load_hadith_collection(collection: str) -> Dict:
     candidates = [
         os.path.join(HADITH_REFERENCE_DIR, f"{collection}.json"),
         os.path.join(HADITH_REFERENCE_DIR, f"{collection}.jsonl"),
+        os.path.join(HADITH_REFERENCE_DIR, "by_book", f"{collection}.json"),
+        os.path.join(HADITH_REFERENCE_DIR, "by_book", f"{collection}.jsonl"),
     ]
     for path in candidates:
         if os.path.exists(path):
@@ -291,6 +293,8 @@ def _format_hadith_entry(entry: Dict, mode: str = "ar") -> str:
         entry.get("translation_id")
         or entry.get("translation")
         or entry.get("text_id")
+        or entry.get("translation_en")
+        or entry.get("english_text")
         or ""
     ).strip()
     grade = str(entry.get("grade") or entry.get("hukm") or "").strip()
