@@ -200,12 +200,18 @@ a:hover{text-decoration:underline}
           <option value="all">Semua</option>
           <option value="en">English</option>
         </select>
+        <label for="mode">Mode</label>
+        <select id="mode">
+          <option value="fast" selected>Cepat</option>
+          <option value="balanced">Seimbang</option>
+        </select>
         <label for="topk">Top hasil</label>
         <select id="topk">
           <option value="3">3</option>
           <option value="5" selected>5</option>
           <option value="8">8</option>
         </select>
+        <a href="/library" class="secondary" style="display:inline-flex;align-items:center;padding:12px 14px;border-radius:14px;border:1px solid var(--line);background:var(--panel-2);color:var(--text);text-decoration:none;font-size:14px;">Daftar Buku</a>
       </div>
       <div class="status" id="status">Siap mencari.</div>
     </div>
@@ -214,7 +220,7 @@ a:hover{text-decoration:underline}
   <section class="results" id="results"></section>
 
   <div class="footer">
-    Endpoint yang dipakai: <code>/search</code>. Hasil klik bisa dibuka ke halaman buku per halaman.
+    Endpoint yang dipakai: <code>/search</code>. Hasil klik bisa dibuka ke halaman buku per halaman. Anda juga bisa melihat <a href="/library">daftar buku</a>.
   </div>
 </div>
 
@@ -271,13 +277,14 @@ async function searchBooks(){
 
   try{
     const language = document.getElementById('language').value;
+    const mode = document.getElementById('mode').value;
     const topk = document.getElementById('topk').value;
-    const resp = await fetch(`${API_BASE}/search?q=${encodeURIComponent(q)}&top_k=${encodeURIComponent(topk)}&language=${encodeURIComponent(language)}`);
+    const resp = await fetch(`${API_BASE}/search?q=${encodeURIComponent(q)}&top_k=${encodeURIComponent(topk)}&language=${encodeURIComponent(language)}&mode=${encodeURIComponent(mode)}`);
     if(!resp.ok) throw new Error(`HTTP ${resp.status}`);
     const data = await resp.json();
     const items = data.results || [];
 
-    status.textContent = `Ditemukan ${items.length} hasil untuk: "${data.query}"`;
+    status.textContent = `Ditemukan ${items.length} hasil untuk: "${data.query}" (${data.mode || mode})`;
 
     if(items.length === 0){
       results.innerHTML = '<div class="empty">Tidak ada hasil yang cocok.</div>';
@@ -289,7 +296,7 @@ async function searchBooks(){
       const pageStart = p.page_start ?? '?';
       const pageEnd = p.page_end ?? '?';
       const pageLabel = pageStart === pageEnd ? `${pageStart}` : `${pageStart}–${pageEnd}`;
-      const sourceLink = `/books/${encodeURIComponent(p.book_id || '')}/pages/${encodeURIComponent(pageStart)}`;
+      const sourceLink = `/books/${encodeURIComponent(p.book_id || '')}/pages/${encodeURIComponent(pageStart)}/view?q=${encodeURIComponent(q)}`;
       return `
         <article class="result">
           <div class="result-head">

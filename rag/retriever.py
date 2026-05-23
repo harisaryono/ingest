@@ -6,12 +6,14 @@ import pickle
 import re
 import unicodedata
 from collections import Counter, defaultdict
+from functools import lru_cache
 from threading import Lock
 from typing import List, Dict, Optional, Tuple
 
 import requests
 from qdrant_client import QdrantClient
 from qdrant_client.http.models import Filter, FieldCondition, MatchValue
+from qdrant_client.models import SearchParams
 
 from config import (
     OLLAMA_BASE,
@@ -21,6 +23,9 @@ from config import (
     DEFAULT_TOP_K,
     RETRIEVAL_CANDIDATES,
     RETRIEVAL_CANDIDATES_PER_QUERY,
+    QDRANT_SEARCH_HNSW_EF,
+    QDRANT_SEARCH_EXACT,
+    QDRANT_SEARCH_PAYLOAD_FIELDS,
     LEXICAL_INDEX_PATH,
     JSON_DIR,
 )
@@ -112,6 +117,11 @@ def embed_query(query: str) -> List[float]:
     return resp.json()["embeddings"][0]
 
 
+@lru_cache(maxsize=256)
+def _embed_query_cached(query: str) -> Tuple[float, ...]:
+    return tuple(embed_query(query))
+
+
 def _extract_keywords(text: str, min_len: int = 3) -> List[str]:
     words = _tokenize(text)
     stopwords = {
@@ -184,14 +194,8 @@ def _build_query_variants(query: str) -> List[str]:
                 seen_terms.add(term)
 
     merged_variant = " ".join([query] + merged_terms)
-    if merged_variant not in variants:
+    if merged_variant not in variants and merged_variant.strip() != query.strip():
         variants.append(merged_variant)
-
-    for group in groups:
-        if len(group) > 1:
-            variant = " ".join(group)
-            if variant not in variants:
-                variants.append(variant)
 
     return variants
 
@@ -460,7 +464,9 @@ def retrieve(
     query: str,
     top_k: int = DEFAULT_TOP_K,
     language: str = "id",
+    mode: str = "balanced",
 ) -> List[Dict]:
+    mode = (mode or "balanced").strip().lower()
     client = _get_client()
 
     qdrant_filter = None
@@ -471,23 +477,6 @@ def retrieve(
 
     candidate_map: Dict[str, Dict] = {}
     query_variants = _build_query_variants(query)
-
-    for variant in query_variants:
-        query_embedding = embed_query(variant)
-        raw_response = client.query_points(
-            collection_name=COLLECTION_NAME,
-            query=query_embedding,
-            limit=RETRIEVAL_CANDIDATES_PER_QUERY,
-            query_filter=qdrant_filter,
-            with_payload=True,
-        )
-
-        raw_results = getattr(raw_response, "points", raw_response)
-        for hit in raw_results:
-            doc_id = str(hit.id)
-            candidate = _merge_candidate(candidate_map, doc_id, hit.payload or {}, text=(hit.payload or {}).get("text", ""))
-            if hit.score > candidate.get("dense_score", 0.0):
-                candidate["dense_score"] = float(hit.score)
 
     lexical_index = _load_lexical_index()
     bm25_scores = {}
@@ -511,9 +500,36 @@ def retrieve(
                 candidate["bm25_score"] = float(score)
             candidate["bm25_terms"] = bm25_matched_terms.get(doc_id, candidate.get("bm25_terms", []))
 
+    if mode != "fast":
+        for variant in query_variants:
+            query_embedding = list(_embed_query_cached(variant))
+            raw_response = client.query_points(
+                collection_name=COLLECTION_NAME,
+                query=query_embedding,
+                limit=RETRIEVAL_CANDIDATES_PER_QUERY,
+                query_filter=qdrant_filter,
+                search_params=SearchParams(
+                    hnsw_ef=QDRANT_SEARCH_HNSW_EF,
+                    exact=QDRANT_SEARCH_EXACT,
+                ),
+                with_payload=QDRANT_SEARCH_PAYLOAD_FIELDS,
+            )
+
+            raw_results = getattr(raw_response, "points", raw_response)
+            for hit in raw_results:
+                doc_id = str(hit.id)
+                candidate = _merge_candidate(candidate_map, doc_id, hit.payload or {}, text=(hit.payload or {}).get("text", ""))
+                if hit.score > candidate.get("dense_score", 0.0):
+                    candidate["dense_score"] = float(hit.score)
+
     results = list(candidate_map.values())
     if not results:
         return []
 
-    results = rerank(results, query, bm25_scores=bm25_scores if lexical_index else None, matched_terms=bm25_matched_terms if lexical_index else None)
+    results = rerank(
+        results,
+        query,
+        bm25_scores=bm25_scores if lexical_index else None,
+        matched_terms=bm25_matched_terms if lexical_index else None,
+    )
     return results[:top_k]

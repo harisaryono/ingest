@@ -30,6 +30,21 @@ JSON_DIR = os.path.join(DATABASE_DIR, "json_output")
 DEFAULT_TOP_K = 5
 RETRIEVAL_CANDIDATES = 20
 RETRIEVAL_CANDIDATES_PER_QUERY = 12
+QDRANT_SEARCH_HNSW_EF = int(os.getenv("QDRANT_SEARCH_HNSW_EF", "32"))
+QDRANT_SEARCH_EXACT = os.getenv("QDRANT_SEARCH_EXACT", "0") == "1"
+QDRANT_SEARCH_PAYLOAD_FIELDS = [
+    "text",
+    "title",
+    "book_id",
+    "filename",
+    "page_start",
+    "page_end",
+    "chunk_idx",
+    "language",
+    "source_type",
+    "document_type",
+    "conversion_status",
+]
 CHUNK_MAX_CHARS = 500
 CHUNK_OVERLAP = 50
 CHUNK_MIN_CHARS = 80

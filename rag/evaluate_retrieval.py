@@ -61,7 +61,7 @@ def result_text(result: Dict) -> str:
 def fetch_results_via_api(api_base: str, query: str, top_k: int, language: str) -> List[Dict]:
     response = requests.get(
         f"{api_base.rstrip('/')}/search",
-        params={"q": query, "top_k": top_k, "language": language},
+        params={"q": query, "top_k": top_k, "language": language, "mode": "balanced"},
         timeout=120,
     )
     response.raise_for_status()
@@ -158,7 +158,7 @@ def main() -> None:
             else:
                 from retriever import retrieve  # noqa: E402
 
-                results = retrieve(query=query, top_k=args.top_k, language=language)
+                results = retrieve(query=query, top_k=args.top_k, language=language, mode="balanced")
         except requests.RequestException as exc:
             raise SystemExit(
                 f"Unable to reach API at {args.api_base}. Start `bash rag/run_api.sh` "
