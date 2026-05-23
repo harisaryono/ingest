@@ -19,7 +19,7 @@ import subprocess
 import tempfile
 import zipfile
 from pathlib import Path
-from urllib.parse import quote
+from urllib.parse import quote, urlencode
 from qdrant_client import QdrantClient
 from bs4 import BeautifulSoup
 from docx import Document
@@ -2138,7 +2138,7 @@ h1 {{
     )
 
 
-def _render_library_html() -> str:
+def _render_library_html(page: int = 1, limit: int = 24, q: str = "", lang: str = "", status: str = "") -> str:
     index = _load_index()
     from qdrant_client import QdrantClient
     point_count = 0
@@ -2158,8 +2158,65 @@ def _render_library_html() -> str:
             str(r.get("filename", "")),
         ),
     )
-    cards_html = []
+    q_norm = (q or "").strip().lower()
+    lang_norm = (lang or "").strip().lower()
+    status_norm = (status or "").strip().lower()
+    filtered_books = []
     for record in books:
+        record_lang = str(record.get("language", "unknown") or "unknown").lower()
+        source_type = infer_source_type(record)
+        document_type = infer_document_type(record)
+        conversion_status = infer_conversion_status(record)
+        review_status = str(record.get("review_status", "approved_auto") or "approved_auto").lower()
+        quality_status = str(record.get("quality_status", "ok") or "ok").lower()
+        ingest_ready = bool(record.get("ingest_ready", True))
+        haystack = " ".join([
+            str(record.get("book_id") or os.path.splitext(record.get("filename", ""))[0]),
+            str(record.get("title", "")),
+            str(record.get("filename", "")),
+            record_lang,
+            source_type,
+            document_type,
+            conversion_status,
+            review_status,
+            quality_status,
+        ]).lower()
+        if q_norm and q_norm not in haystack:
+            continue
+        if lang_norm and lang_norm != record_lang:
+            continue
+        if status_norm and status_norm not in {conversion_status.lower(), review_status, quality_status}:
+            continue
+        filtered_books.append(record)
+
+    total_filtered = len(filtered_books)
+    total_pages = max(1, (total_filtered + max(1, limit) - 1) // max(1, limit))
+    current_page = max(1, min(int(page or 1), total_pages))
+    per_page = max(1, min(int(limit or 24), 96))
+    if per_page != limit:
+        limit = per_page
+        total_pages = max(1, (total_filtered + limit - 1) // limit)
+        current_page = max(1, min(current_page, total_pages))
+    start = (current_page - 1) * limit
+    end = start + limit
+    page_books = filtered_books[start:end]
+
+    def _library_url(page_no: int) -> str:
+        params = {"page": page_no, "limit": limit}
+        if q_norm:
+            params["q"] = q
+        if lang_norm:
+            params["lang"] = lang
+        if status_norm:
+            params["status"] = status
+        return f"/library?{urlencode(params)}"
+
+    prev_url = _library_url(current_page - 1) if current_page > 1 else ""
+    next_url = _library_url(current_page + 1) if current_page < total_pages else ""
+    page_start_label = start + 1 if total_filtered else 0
+    page_end_label = min(end, total_filtered)
+    cards_html = []
+    for record in page_books:
         book_id = record.get("book_id") or os.path.splitext(record.get("filename", ""))[0]
         title = record.get("title", record.get("filename", "Tanpa judul"))
         language = record.get("language", "unknown")
@@ -2283,6 +2340,9 @@ h1{{margin:0;font-size:clamp(32px,6vw,58px);line-height:1}}
   text-decoration:none;
 }}
 .toolbar a.secondary{{background:var(--panel-2);color:var(--text);border:1px solid var(--line)}}
+.pager{{display:flex;flex-wrap:wrap;gap:12px;justify-content:space-between;align-items:center;margin-top:16px}}
+.pager-links{{display:flex;flex-wrap:wrap;gap:10px;align-items:center}}
+.pager .disabled{{display:inline-flex;align-items:center;border-radius:12px;padding:10px 14px;color:var(--muted);border:1px dashed var(--line);background:rgba(255,255,255,.02)}}
 .grid{{display:grid;gap:14px;margin-top:18px}}
 .book-card{{
   display:grid;
@@ -2349,7 +2409,7 @@ h1{{margin:0;font-size:clamp(32px,6vw,58px);line-height:1}}
   <section class="hero">
     <div class="eyebrow">Daftar Buku</div>
     <h1>Koleksi yang tersedia</h1>
-    <p class="lead">Pilih buku untuk membaca, membuka editor JSON, atau melihat raw JSON. Filter di bawah bekerja di browser tanpa memuat ulang halaman.</p>
+    <p class="lead">Pilih buku untuk membaca, membuka editor JSON, atau melihat raw JSON. Daftar ini dipaginasi agar halaman awal cepat dan ringan.</p>
     <div class="stats">
       <div class="pill">Total buku: {stats['total_books']}</div>
       <div class="pill">Siap ingest: {stats['ingest_ready_books']}</div>
@@ -2357,50 +2417,54 @@ h1{{margin:0;font-size:clamp(32px,6vw,58px);line-height:1}}
       <div class="pill">Rejected: {stats['rejected_books']}</div>
       <div class="pill">Points: {stats['total_points_indexed']}</div>
     </div>
-    <div class="toolbar">
-      <input id="filter" type="search" placeholder="Cari judul, book_id, bahasa, status..." />
-      <select id="langFilter">
+    <form class="toolbar" method="get" action="/library">
+      <input name="q" type="search" placeholder="Cari judul, book_id, bahasa, status..." value="{html_lib.escape(q)}" />
+      <select name="lang">
         <option value="">Semua bahasa</option>
-        {''.join(f'<option value="{html_lib.escape(lang)}">{html_lib.escape(lang)} ({count})</option>' for lang, count in sorted(stats["languages"].items()))}
+        {''.join(f'<option value="{html_lib.escape(lang)}"{" selected" if str(lang).lower() == lang_norm else ""}>{html_lib.escape(lang)} ({count})</option>' for lang, count in sorted(stats["languages"].items()))}
       </select>
-      <select id="statusFilter">
+      <select name="status">
         <option value="">Semua status</option>
-        <option value="good">good</option>
-        <option value="failed">failed</option>
-        <option value="pending_review">pending_review</option>
-        <option value="approved_auto">approved_auto</option>
-        <option value="approved_manual">approved_manual</option>
-        <option value="approved_lease">approved_lease</option>
+        <option value="good"{" selected" if status_norm == "good" else ""}>good</option>
+        <option value="failed"{" selected" if status_norm == "failed" else ""}>failed</option>
+        <option value="pending_review"{" selected" if status_norm == "pending_review" else ""}>pending_review</option>
+        <option value="approved_auto"{" selected" if status_norm == "approved_auto" else ""}>approved_auto</option>
+        <option value="approved_manual"{" selected" if status_norm == "approved_manual" else ""}>approved_manual</option>
+        <option value="approved_lease"{" selected" if status_norm == "approved_lease" else ""}>approved_lease</option>
       </select>
-      <a href="/">Kembali ke Search</a>
+      <select name="limit">
+        <option value="12"{" selected" if limit == 12 else ""}>12 / halaman</option>
+        <option value="24"{" selected" if limit == 24 else ""}>24 / halaman</option>
+        <option value="48"{" selected" if limit == 48 else ""}>48 / halaman</option>
+        <option value="96"{" selected" if limit == 96 else ""}>96 / halaman</option>
+      </select>
+      <button type="submit">Terapkan</button>
+      <a href="/library" class="secondary">Reset</a>
+      <a href="/" class="secondary">Kembali ke Search</a>
       <a class="secondary" href="/stats" target="_blank" rel="noreferrer">Stats JSON</a>
+    </form>
+    <div class="pager">
+      <div class="pill">Menampilkan {page_start_label}-{page_end_label} dari {total_filtered} buku</div>
+      <div class="pager-links">
+        {f'<a class="secondary" href="{prev_url}">Sebelumnya</a>' if prev_url else '<span class="disabled">Sebelumnya</span>'}
+        <span class="pill">Halaman {current_page}/{total_pages}</span>
+        {f'<a class="secondary" href="{next_url}">Berikutnya</a>' if next_url else '<span class="disabled">Berikutnya</span>'}
+      </div>
     </div>
   </section>
   <section class="grid" id="bookGrid">
     {cards if cards else '<div class="empty">Tidak ada buku.</div>'}
   </section>
+  <div class="pager">
+    <div class="pager-links">
+      {f'<a class="secondary" href="{prev_url}">Sebelumnya</a>' if prev_url else '<span class="disabled">Sebelumnya</span>'}
+      <span class="pill">Halaman {current_page}/{total_pages}</span>
+      {f'<a class="secondary" href="{next_url}">Berikutnya</a>' if next_url else '<span class="disabled">Berikutnya</span>'}
+    </div>
+  </div>
 </div>
 <script>
 (function() {{
-  const filter = document.getElementById('filter');
-  const langFilter = document.getElementById('langFilter');
-  const statusFilter = document.getElementById('statusFilter');
-  const cards = Array.from(document.querySelectorAll('.book-card'));
-  function applyFilter() {{
-    const q = (filter.value || '').trim().toLowerCase();
-    const lang = (langFilter.value || '').trim().toLowerCase();
-    const status = (statusFilter.value || '').trim().toLowerCase();
-    cards.forEach(card => {{
-      const hay = (card.dataset.search || '').toLowerCase();
-      const langOk = !lang || hay.includes(` ${{lang}} `) || hay.includes(` ${{lang}}-`) || hay.includes(`-${{lang}} `);
-      const statusOk = !status || hay.includes(status);
-      const textOk = !q || hay.includes(q);
-      card.style.display = (langOk && statusOk && textOk) ? '' : 'none';
-    }});
-  }}
-  filter.addEventListener('input', applyFilter);
-  langFilter.addEventListener('change', applyFilter);
-  statusFilter.addEventListener('change', applyFilter);
   const apiBase = window.location.origin;
   async function sendReview(bookId, action) {{
     const reviewer = prompt('Reviewer', 'web') || 'web';
@@ -2806,8 +2870,8 @@ def search(q: str, top_k: int = 5, language: str = "id", mode: str = "fast"):
 
 
 @app.get("/books")
-def list_books():
-    return [{
+def list_books(page: int | None = None, limit: int = 100):
+    items = [{
         "book_id": r.get("book_id") or os.path.splitext(r["filename"])[0],
         "filename": r["filename"],
         "json_filename": os.path.basename(resolve_index_json_path(r, JSON_DIR)),
@@ -2826,10 +2890,28 @@ def list_books():
         "ingest_ready": bool(r.get("ingest_ready", True)),
     } for r in _load_index()["files"]]
 
+    if page is None:
+        return items
+
+    limit = max(1, min(int(limit or 100), 500))
+    page = max(1, int(page or 1))
+    total = len(items)
+    total_pages = max(1, (total + limit - 1) // limit)
+    page = min(page, total_pages)
+    start = (page - 1) * limit
+    end = start + limit
+    return {
+        "items": items[start:end],
+        "page": page,
+        "limit": limit,
+        "total": total,
+        "total_pages": total_pages,
+    }
+
 
 @app.get("/library", response_class=HTMLResponse)
-def library():
-    return HTMLResponse(_render_library_html())
+def library(page: int = 1, limit: int = 24, q: str = "", lang: str = "", status: str = ""):
+    return HTMLResponse(_render_library_html(page=page, limit=limit, q=q, lang=lang, status=status))
 
 
 @app.get("/books/{book_id}")
