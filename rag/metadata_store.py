@@ -8,7 +8,10 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Dict, Iterable, Iterator, List, Optional
 
-from config import METADATA_DB_PATH
+try:
+    from config import METADATA_DB_PATH
+except ImportError:  # pragma: no cover - package import fallback
+    from .config import METADATA_DB_PATH
 
 
 SCHEMA = """
