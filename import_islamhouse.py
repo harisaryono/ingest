@@ -42,6 +42,7 @@ from typing import Dict, Iterable, List, Optional, Tuple
 
 from bs4 import BeautifulSoup
 from docx import Document
+import fitz
 from pdfminer.high_level import extract_text as pdf_extract_text
 
 SCRIPT_DIR = Path(__file__).resolve().parent
@@ -342,6 +343,108 @@ def split_pages_from_text(text: str) -> List[str]:
     return pages
 
 
+def run_pdftotext(path: Path, timeout_seconds: int | None = None) -> str:
+    if shutil.which("pdftotext") is None:
+        raise RuntimeError("pdftotext not available")
+    try:
+        result = subprocess.run(
+            [
+                "pdftotext",
+                "-layout",
+                "-enc",
+                "UTF-8",
+                str(path),
+                "-",
+            ],
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+            check=False,
+            timeout=timeout_seconds,
+        )
+    except subprocess.TimeoutExpired as e:
+        raise FileTimeoutError(f"pdftotext timed out for {path.name}") from e
+    text = result.stdout or ""
+    if not text.strip() and result.returncode != 0:
+        raise RuntimeError(
+            f"pdftotext failed for {path.name}: {result.stderr.strip() or result.stdout.strip()}"
+        )
+    return text
+
+
+def pdf_pages_from_text(text: str) -> List[str]:
+    pages = split_pages_from_text(text)
+    if pages:
+        return pages
+    text = (text or "").strip()
+    return [text] if text else []
+
+
+def pdf_text_is_suspicious(pages: List[str], path: Path, extractor: str) -> bool:
+    text = "\n".join(pages).strip()
+    if not text:
+        return True
+
+    profile = char_profile(text)
+    nonspace_chars = profile["nonspace_chars"]
+    letters = profile["letters"]
+    size_bytes = path.stat().st_size
+    page_count = len(pages)
+
+    if size_bytes >= 200_000 and nonspace_chars < 120:
+        return True
+    if size_bytes >= 1_000_000 and nonspace_chars < 350:
+        return True
+    if page_count <= 1 and size_bytes >= 100_000 and nonspace_chars < 200:
+        return True
+    if profile["replacement"] and profile["replacement"] / max(profile["total_chars"], 1) > 0.01:
+        return True
+    if extractor == "pdftotext" and ("cid:" in text.lower() or text.count("(cid:") > 3):
+        return True
+    if letters and letters / max(nonspace_chars, 1) < 0.18 and size_bytes >= 100_000:
+        return True
+    return False
+
+
+def read_pdf_file_via_tesseract(path: Path, timeout_seconds: int | None = None) -> List[str]:
+    if shutil.which("tesseract") is None:
+        raise RuntimeError("tesseract not available")
+
+    with tempfile.TemporaryDirectory(prefix="islamhouse-pdfocr-") as tmp:
+        tmpdir = Path(tmp)
+        doc = fitz.open(str(path))
+        pages: List[str] = []
+        zoom = 2.0
+        matrix = fitz.Matrix(zoom, zoom)
+        for i in range(len(doc)):
+            page = doc[i]
+            pix = page.get_pixmap(matrix=matrix, alpha=False)
+            img_path = tmpdir / f"page_{i + 1:04d}.png"
+            pix.save(str(img_path))
+            try:
+                result = subprocess.run(
+                    [
+                        "tesseract",
+                        str(img_path),
+                        "stdout",
+                        "-l",
+                        "ara+eng",
+                        "--psm",
+                        "6",
+                    ],
+                    stdout=subprocess.PIPE,
+                    stderr=subprocess.PIPE,
+                    text=True,
+                    check=False,
+                    timeout=timeout_seconds,
+                )
+            except subprocess.TimeoutExpired as e:
+                raise FileTimeoutError(f"tesseract timed out for {path.name} page {i + 1}") from e
+            page_text = (result.stdout or "").strip()
+            pages.append(page_text)
+        return [p for p in pages if p.strip()]
+
+
 def read_text_file(path: Path) -> List[str]:
     with path.open("r", encoding="utf-8", errors="replace") as f:
         content = f.read()
@@ -387,9 +490,34 @@ def read_docx_file(path: Path) -> List[str]:
 
 
 def read_pdf_file(path: Path) -> List[str]:
-    text = pdf_extract_text(str(path))
-    pages = split_pages_from_text(text)
-    return pages or [text.strip()]
+    candidates: List[Tuple[str, List[str]]] = []
+
+    try:
+        pdftotext_text = run_pdftotext(path)
+        pdftotext_pages = pdf_pages_from_text(pdftotext_text)
+        if pdftotext_pages:
+            candidates.append(("pdftotext", pdftotext_pages))
+            if not pdf_text_is_suspicious(pdftotext_pages, path, "pdftotext"):
+                return pdftotext_pages
+    except Exception:
+        pass
+
+    try:
+        pdfminer_text = pdf_extract_text(str(path))
+        pdfminer_pages = split_pages_from_text(pdfminer_text)
+        if not pdfminer_pages and pdfminer_text.strip():
+            pdfminer_pages = [pdfminer_text.strip()]
+        if pdfminer_pages:
+            candidates.append(("pdfminer", pdfminer_pages))
+            if not pdf_text_is_suspicious(pdfminer_pages, path, "pdfminer"):
+                return pdfminer_pages
+    except Exception:
+        pass
+
+    if candidates:
+        candidates.sort(key=lambda item: sum(len(page.strip()) for page in item[1]), reverse=True)
+        return candidates[0][1]
+    return []
 
 
 def read_zip_xhtml_file(path: Path) -> List[str]:
@@ -498,7 +626,7 @@ def analyze_quality(pages: List[str], language: str, path: Path, extractor: str,
         warnings.append("high_symbol_density")
     if not expected_arabic and profile["arabic_chars"] >= 20 and profile["latin_chars"] >= 20 and profile["nonspace_chars"] >= 300:
         warnings.append("mixed_script_content")
-    if extractor in {"pdf", "libreoffice-html"} and size_bytes >= 1024 * 1024 and profile["nonspace_chars"] < 400:
+    if (extractor.startswith("pdf") or extractor == "libreoffice-html") and size_bytes >= 1024 * 1024 and profile["nonspace_chars"] < 400:
         reasons.append("conversion_loss_suspected")
 
     status = "ok"
@@ -526,6 +654,81 @@ def analyze_quality(pages: List[str], language: str, path: Path, extractor: str,
             "replacement_ratio": round(replacement_ratio, 4),
             "arabic_ratio": round(arabic_ratio, 4),
             "latin_ratio": round(latin_ratio, 4),
+            "unique_char_ratio": round(unique_char_ratio, 4),
+        },
+    }
+
+
+def analyze_page_quality(page_text: str, language: str, path: Path, extractor: str, page_num: int) -> Dict:
+    text = unicodedata.normalize("NFKC", html_lib.unescape(page_text or "")).replace("\x0c", " ").replace("\xa0", " ")
+    profile = char_profile(text)
+    tokens = WORD_RE.findall(normalize_text(text, language))
+    token_count = len(tokens)
+    unique_tokens = set(tokens)
+    unique_word_ratio = len(unique_tokens) / token_count if token_count else 0.0
+    nonspace_chars = profile["nonspace_chars"]
+    replacement_ratio = profile["replacement"] / max(profile["total_chars"], 1)
+    symbol_ratio = (profile["punct"] + profile["symbols"]) / max(profile["letters"] + profile["digits"] + profile["punct"] + profile["symbols"], 1)
+    unique_char_ratio = len(set(text)) / max(nonspace_chars, 1)
+    detected_script = detect_script(text)
+    expected_language = detect_language(path)
+    expected_arabic = expected_language == "ar" or language == "ar" or any(part.lower() == "ar" for part in path.parts)
+
+    reasons: List[str] = []
+    warnings: List[str] = []
+
+    if nonspace_chars < 25 or token_count < 5:
+        reasons.append("too_short_or_empty")
+    if nonspace_chars >= 80 and unique_char_ratio < 0.05:
+        reasons.append("low_character_diversity")
+    if replacement_ratio >= 0.01:
+        reasons.append("encoding_replacement_chars")
+    if extractor == "pdftotext" and ("cid:" in text.lower() or text.count("(cid:") > 1):
+        reasons.append("cid_tokens_detected")
+    if expected_arabic:
+        if profile["arabic_chars"] == 0 and profile["latin_chars"] >= 10 and nonspace_chars >= 30:
+            reasons.append("arabic_script_mismatch")
+        elif profile["arabic_chars"] < 8 and nonspace_chars >= 50:
+            reasons.append("arabic_missing")
+        elif detect_script(text) == "latin" and nonspace_chars >= 30:
+            reasons.append("arabic_script_mismatch")
+
+    if token_count >= 60 and unique_word_ratio < 0.2:
+        warnings.append("low_vocab_diversity")
+    if symbol_ratio >= 0.45 and nonspace_chars >= 80:
+        warnings.append("high_symbol_density")
+    if profile["arabic_chars"] >= 20 and profile["latin_chars"] >= 20 and nonspace_chars >= 150:
+        warnings.append("mixed_script_content")
+
+    status = "ok"
+    if reasons:
+        status = "ocr_needed"
+    elif warnings:
+        status = "warn"
+
+    score = 1.0
+    score -= min(0.35, max(0.0, (25 - nonspace_chars) / 100.0)) if nonspace_chars < 25 else 0.0
+    score -= min(0.20, max(0.0, (0.05 - unique_char_ratio) * 2.0)) if unique_char_ratio < 0.05 else 0.0
+    score -= min(0.20, replacement_ratio * 8.0)
+    score -= 0.18 if "cid_tokens_detected" in reasons else 0.0
+    score -= min(0.20, len(warnings) * 0.05)
+    score = max(0.0, round(score, 4))
+
+    return {
+        "page": page_num,
+        "status": status,
+        "score": score,
+        "reasons": reasons,
+        "warnings": warnings,
+        "ocr_needed": status != "ok",
+        "expected_language": expected_language,
+        "expected_arabic": expected_arabic,
+        "detected_script": detected_script,
+        "metrics": {
+            **profile,
+            "token_count": token_count,
+            "unique_word_ratio": round(unique_word_ratio, 4),
+            "symbol_ratio": round(symbol_ratio, 4),
             "unique_char_ratio": round(unique_char_ratio, 4),
         },
     }
@@ -1148,6 +1351,9 @@ def process_file(
         "content_hash": signature.content_hash,
         "text_hash": signature.text_hash,
         "text_simhash": signature.text_simhash,
+        "import_stage": 1,
+        "pdf_pipeline": "pdftotext>pdfminer",
+        "pdf_ocr_strategy": "deferred_per_page",
         "extractor": extractor,
         "quality_status": quality["status"],
         "quality_reasons": quality["reasons"],
@@ -1158,6 +1364,26 @@ def process_file(
         "quality_detected_script": quality["detected_script"],
         "conversion_status": conversion_status_from_quality(quality["status"]),
     }
+
+    page_quality_entries = [
+        analyze_page_quality(page, language, path, extractor, idx + 1)
+        for idx, page in enumerate(pages)
+    ]
+    page_quality_counts: Dict[str, int] = {}
+    page_ocr_candidates: List[int] = []
+    for entry in page_quality_entries:
+        status = entry.get("status", "ok")
+        page_quality_counts[status] = page_quality_counts.get(status, 0) + 1
+        if entry.get("ocr_needed"):
+            page_ocr_candidates.append(int(entry.get("page", 0) or 0))
+    record["page_quality_summary"] = {
+        "stage": 1,
+        "strategy": "pdftotext>pdfminer",
+        "pages": len(page_quality_entries),
+        "ocr_candidates": len(page_ocr_candidates),
+        "counts": page_quality_counts,
+    }
+    record["page_ocr_candidates"] = page_ocr_candidates
 
     if quality["status"] == "quarantine":
         record.update(
@@ -1184,7 +1410,19 @@ def process_file(
 
     book_json = {
         **record,
-        "pages": [{"page": i + 1, "content": page} for i, page in enumerate(pages)],
+        "pages": [
+            {
+                "page": i + 1,
+                "content": page,
+                "page_quality_status": page_quality_entries[i].get("status", "ok") if i < len(page_quality_entries) else "ok",
+                "page_quality_score": page_quality_entries[i].get("score", 1.0) if i < len(page_quality_entries) else 1.0,
+                "page_quality_reasons": page_quality_entries[i].get("reasons", []) if i < len(page_quality_entries) else [],
+                "page_quality_warnings": page_quality_entries[i].get("warnings", []) if i < len(page_quality_entries) else [],
+                "page_ocr_needed": page_quality_entries[i].get("ocr_needed", False) if i < len(page_quality_entries) else False,
+                "page_import_stage": 1,
+            }
+            for i, page in enumerate(pages)
+        ],
     }
 
     return book_json, duplicate_of, {"score": score, "reason": reason}, extractor
@@ -1357,6 +1595,7 @@ def main() -> None:
     log(f"File timeout     : {args.file_timeout_seconds}s")
     log(f"Hash timeout     : {args.hash_timeout_seconds}s")
     log(f"Extract timeout  : {args.extract_timeout_seconds}s")
+    log("PDF stage       : 1 (pdftotext > pdfminer; OCR deferred per page)")
 
     processed = 0
     imported = 0
