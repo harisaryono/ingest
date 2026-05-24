@@ -1233,6 +1233,7 @@ def main() -> None:
     parser.add_argument("--duplicate-threshold", type=float, default=0.92, help="page overlap threshold for duplicate detection")
     parser.add_argument("--limit", type=int, default=0, help="process at most N files for testing")
     parser.add_argument("--file-timeout-seconds", type=int, default=int(os.getenv("IMPORT_FILE_TIMEOUT_SECONDS", "600")), help="skip a file if processing exceeds this many seconds")
+    parser.add_argument("--hash-timeout-seconds", type=int, default=int(os.getenv("IMPORT_HASH_TIMEOUT_SECONDS", "120")), help="skip a file if hashing exceeds this many seconds")
     parser.add_argument("--log-file", default=os.getenv("IMPORT_ISLAMHOUSE_LOG_FILE", str(DEFAULT_LOG_FILE)), help="append progress output to this file")
     parser.add_argument("--skip-canonicalize", action="store_true", help="skip post-import family canonicalization")
     parser.add_argument("--no-prune-qdrant", action="store_true", help="keep Qdrant state untouched when canonicalizing")
@@ -1271,6 +1272,7 @@ def main() -> None:
     log(f"Family cache     : {len(content_family_cache.get('families', {}))}")
     log(f"Family cache boot: {'yes' if content_family_cache.get('bootstrapped') else 'no'}")
     log(f"File timeout     : {args.file_timeout_seconds}s")
+    log(f"Hash timeout     : {args.hash_timeout_seconds}s")
 
     processed = 0
     imported = 0
@@ -1284,7 +1286,11 @@ def main() -> None:
     for i, path in enumerate(files, 1):
         processed += 1
         try:
-            source_hash = sha256_file(path)
+            source_hash = run_with_timeout(
+                args.hash_timeout_seconds,
+                sha256_file,
+                path,
+            )
         except Exception as e:
             unsupported += 1
             log(f"[{i:04d}] HASHERR {path.name}: {e}")
@@ -1300,6 +1306,7 @@ def main() -> None:
                     "document_type": "html_document" if source_type_from_path(path) == "html" else "book",
                     "status": "skipped",
                     "reason": "source_hash_error",
+                    "hash_timeout_seconds": args.hash_timeout_seconds,
                     "error": str(e),
                 },
             )
