@@ -16,6 +16,7 @@ from dorar_client import search_dorar_hadith
 
 DELETE_BLOCK_RE = re.compile(r"\[\[DELETE_START\]\].*?\[\[DELETE_END\]\]", re.I | re.S)
 QURAN_RE = re.compile(r"\[\[(?:FIX_)?QS\s+(\d{1,3}):(\d{1,3})(?:\s+([a-z0-9+_-]+))?\]\]", re.I)
+ARABIC_BLOCK_RE = re.compile(r"\[\[(?:ARABIC_BLOCK|FIX_ARABIC_BLOCK)\s+([a-z0-9_.-]+)\]\]", re.I | re.S)
 DORAR_LOCAL_HADITH_RE = re.compile(
     r"\[\[(?:FIX_HADITH|FIX_HADITH_LOCAL|HADITH)\s+([a-z0-9_.-]+)\s*:\s*([0-9a-zA-Z_.-]+)(?:\s+([a-z0-9+_-]+))?\]\]",
     re.I | re.S,
@@ -630,18 +631,28 @@ def apply_reference_markers(
     dorar_limit: int = 5,
     dorar_policy: str = "preserve",
     dorar_choices: Dict[str, int] | None = None,
+    arabic_blocks: List[Dict] | None = None,
 ) -> Dict:
     """
     Apply reference markers to a text draft.
 
     - DELETE_START/END blocks are removed.
     - QS markers are replaced from local Quran reference data.
+    - ARABIC_BLOCK markers are replaced from cached Arabic OCR blocks.
     - DORAR markers are searched and can optionally be replaced by selected candidates.
     """
     source_text = text or ""
     stages: List[Dict] = []
     unresolved: List[Dict] = []
     dorar_candidates: Dict[str, List[Dict]] = {}
+    arabic_block_map: Dict[str, Dict] = {}
+    if isinstance(arabic_blocks, list):
+        for block in arabic_blocks:
+            if not isinstance(block, dict):
+                continue
+            block_id = str(block.get("block_id") or "").strip()
+            if block_id:
+                arabic_block_map[block_id.lower()] = block
 
     def _delete_blocks(value: str) -> str:
         removed = 0
@@ -702,6 +713,28 @@ def apply_reference_markers(
             stages.append({"type": "hadith_local", "count": replaced})
         return value
 
+    def _replace_arabic_blocks(value: str) -> str:
+        replaced = 0
+
+        def repl(match):
+            nonlocal replaced
+            block_id = (match.group(1) or "").strip()
+            block = arabic_block_map.get(block_id.lower())
+            if not block:
+                unresolved.append({"type": "arabic_block", "block_id": block_id, "marker": match.group(0)})
+                return match.group(0)
+            replaced += 1
+            text_value = str(block.get("ocr_text") or block.get("text") or "").strip()
+            if not text_value:
+                unresolved.append({"type": "arabic_block", "block_id": block_id, "marker": match.group(0), "reason": "empty"})
+                return match.group(0)
+            return text_value
+
+        value = ARABIC_BLOCK_RE.sub(repl, value)
+        if replaced:
+            stages.append({"type": "arabic_block", "count": replaced})
+        return value
+
     def _replace_dorar(value: str) -> str:
         found = 0
 
@@ -751,6 +784,7 @@ def apply_reference_markers(
     resolved = _delete_blocks(source_text)
     resolved = _replace_quran(resolved)
     resolved = _replace_local_hadith(resolved)
+    resolved = _replace_arabic_blocks(resolved)
     resolved = _replace_dorar(resolved)
 
     return {

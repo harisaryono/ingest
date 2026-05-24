@@ -1349,7 +1349,7 @@ textarea:focus,input[type="text"]:focus{{border-color:rgba(120,215,255,.4);box-s
           <section class="tab-panel" data-tab-panel="marker">
             <div class="group">
               <div class="label">Marker replacement</div>
-              <input id="markerHint" type="text" value="[[FIX_QS 5:41]] / [[FIX_HADITH bukhari:1]] / [[DELETE_START]]...[[DELETE_END]] / [[DORAR_SEARCH ...]]" readonly>
+              <input id="markerHint" type="text" value="[[FIX_QS 5:41]] / [[FIX_HADITH bukhari:1]] / [[ARABIC_BLOCK p011_b017]] / [[DELETE_START]]...[[DELETE_END]] / [[DORAR_SEARCH ...]]" readonly>
             </div>
             <div class="panel-actions">
               <button id="applyMarkers" type="button" class="secondary">Preview markers</button>
@@ -1712,6 +1712,7 @@ textarea:focus,input[type="text"]:focus{{border-color:rgba(120,215,255,.4);box-s
           <div class="arabic-actions">
             <button type="button" class="secondary" data-ocr-arabic="${{blockId}}">OCR ulang</button>
             <button type="button" data-insert-arabic="${{blockId}}">Sisipkan OCR</button>
+            <button type="button" class="secondary" data-insert-arabic-marker="${{blockId}}">Sisipkan marker</button>
           </div>
         </article>
       `;
@@ -1750,6 +1751,14 @@ textarea:focus,input[type="text"]:focus{{border-color:rgba(120,215,255,.4);box-s
         }} catch (err) {{
           setStatus(`OCR blok ${{blockId}} gagal: ${{err.message}}`);
         }}
+      }});
+    }});
+    arabicBlocksResults.querySelectorAll('[data-insert-arabic-marker]').forEach(btn => {{
+      btn.addEventListener('click', () => {{
+        const blockId = btn.dataset.insertArabicMarker || '';
+        if (!blockId) return;
+        insertAtCursor(pageContent, `[[ARABIC_BLOCK ${{blockId}}]]`);
+        setStatus(`Marker Arab disisipkan untuk blok ${{blockId}}.`);
       }});
     }});
   }}
@@ -3910,6 +3919,7 @@ def page_apply_markers(book_id: str, page_num: int, req: PageMarkerApplyRequest)
         req.content,
         dorar_policy=req.dorar_policy,
         dorar_choices=req.dorar_choices,
+        arabic_blocks=(load_cached_arabic_blocks(str(book_id), int(page_num)) or {}).get("blocks", []),
     )
     diff_text = _build_unified_diff(req.content, result["resolved_text"], from_label="draft", to_label="resolved")
     diff_summary = "Tidak ada perubahan."
