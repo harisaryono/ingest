@@ -60,7 +60,7 @@ INDEX_PATH = OUTPUT_DIR / "_index.json"
 SOURCE_HASH_CACHE_PATH = DATABASE_DIR / "import_source_hash_cache.json"
 CONTENT_FAMILY_CACHE_PATH = DATABASE_DIR / "import_content_family_cache.json"
 LOG_FILE_HANDLE = None
-BOOTSTRAP_SOURCE_HASH_FROM_REPORTS = os.getenv("IMPORT_SOURCE_HASH_BOOTSTRAP_REPORTS", "0").lower() in {
+BOOTSTRAP_SOURCE_HASH_FROM_REPORTS = os.getenv("IMPORT_SOURCE_HASH_BOOTSTRAP_REPORTS", "1").lower() in {
     "1",
     "true",
     "yes",
