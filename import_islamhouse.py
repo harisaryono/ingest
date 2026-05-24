@@ -1238,6 +1238,8 @@ def main() -> None:
     parser.add_argument("--log-file", default=os.getenv("IMPORT_ISLAMHOUSE_LOG_FILE", str(DEFAULT_LOG_FILE)), help="append progress output to this file")
     parser.add_argument("--skip-canonicalize", action="store_true", help="skip post-import family canonicalization")
     parser.add_argument("--no-prune-qdrant", action="store_true", help="keep Qdrant state untouched when canonicalizing")
+    parser.add_argument("--refresh-hash-cache", action="store_true", help="rebuild the source hash cache at startup")
+    parser.add_argument("--refresh-family-cache", action="store_true", help="rebuild the content family cache at startup")
     args = parser.parse_args()
 
     open_log_file(Path(args.log_file) if args.log_file else None)
@@ -1250,12 +1252,14 @@ def main() -> None:
 
     index, catalog = load_catalog(OUTPUT_DIR)
     source_hash_cache = load_source_hash_cache()
-    cache_added = bootstrap_source_hash_cache(source_hash_cache, index)
-    if cache_added or not SOURCE_HASH_CACHE_PATH.exists() or not source_hash_cache.get("bootstrapped"):
+    cache_added = 0
+    if args.refresh_hash_cache or not SOURCE_HASH_CACHE_PATH.exists() or not source_hash_cache.get("bootstrapped"):
+        cache_added = bootstrap_source_hash_cache(source_hash_cache, index)
         save_json(SOURCE_HASH_CACHE_PATH, source_hash_cache)
     content_family_cache = load_content_family_cache()
-    family_added = bootstrap_content_family_cache(content_family_cache, index, OUTPUT_DIR)
-    if family_added or not CONTENT_FAMILY_CACHE_PATH.exists() or not content_family_cache.get("bootstrapped"):
+    family_added = 0
+    if args.refresh_family_cache or not CONTENT_FAMILY_CACHE_PATH.exists() or not content_family_cache.get("bootstrapped"):
+        family_added = bootstrap_content_family_cache(content_family_cache, index, OUTPUT_DIR)
         save_json(CONTENT_FAMILY_CACHE_PATH, content_family_cache)
     files = scan_files(input_dir, args.recursive)
     if args.limit and args.limit > 0:
@@ -1272,6 +1276,8 @@ def main() -> None:
     log(f"Hash cache boot  : {'yes' if source_hash_cache.get('bootstrapped') else 'no'}")
     log(f"Family cache     : {len(content_family_cache.get('families', {}))}")
     log(f"Family cache boot: {'yes' if content_family_cache.get('bootstrapped') else 'no'}")
+    log(f"Hash cache init  : {'refreshed' if cache_added else 'loaded'}")
+    log(f"Family cache init: {'refreshed' if family_added else 'loaded'}")
     log(f"File timeout     : {args.file_timeout_seconds}s")
     log(f"Hash timeout     : {args.hash_timeout_seconds}s")
 
