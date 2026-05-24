@@ -1,7 +1,7 @@
 from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
-from fastapi.responses import JSONResponse, HTMLResponse
+from fastapi.responses import JSONResponse, HTMLResponse, Response
 from pydantic import BaseModel, Field
 import difflib
 from typing import List, Dict, Tuple
@@ -21,6 +21,7 @@ import zipfile
 from pathlib import Path
 from urllib.parse import quote, urlencode
 from qdrant_client import QdrantClient
+import fitz
 from bs4 import BeautifulSoup
 from docx import Document
 from pdfminer.high_level import extract_text as pdf_extract_text
@@ -1062,7 +1063,18 @@ def _render_page_review_html(record: Dict, book: Dict, page: Dict, page_num: int
     source_page_text, source_page_num, source_total_pages, source_type, source_path = _source_page_text(record, page_num)
     theme = "light" if str(theme).lower() == "light" else "dark"
     font_size = max(14, min(int(font_size or 18), 28))
-    preview_url = f"/sources/{quote(str(book_id))}/pages/{source_page_num}?theme={theme}&font={font_size}&q={quote(q)}"
+    preview_is_pdf = str(source_type).lower() == "pdf"
+    preview_url = (
+        f"/sources/{quote(str(book_id))}/pages/{source_page_num}/image?zoom=2.0"
+        if preview_is_pdf
+        else f"/sources/{quote(str(book_id))}/pages/{source_page_num}?theme={theme}&font={font_size}&q={quote(q)}"
+    )
+    preview_mode_label = "Gambar asli PDF" if preview_is_pdf else "Preview sumber asli"
+    preview_widget_html = (
+        f'<div class="preview-box"><img class="pdf-preview" src="{preview_url}" alt="Preview halaman sumber {source_page_num}"></div>'
+        if preview_is_pdf
+        else f'<iframe class="preview-iframe" src="{preview_url}" title="Preview sumber asli"></iframe>'
+    )
     current_page = int(page.get("page", page_num) or page_num)
     prev_page = current_page - 1 if current_page > 1 else None
     next_page = current_page + 1 if current_page < int(book.get("total_pages", current_page) or current_page) else None
@@ -1153,6 +1165,23 @@ h1{{margin:0;font-size:clamp(28px,5vw,44px);line-height:1.1}}
 .panel-head{{padding:16px 18px;border-bottom:1px solid var(--line);display:flex;justify-content:space-between;gap:10px;align-items:flex-start;flex-wrap:wrap}}
 .panel-head h2{{margin:0;font-size:16px}}
 .panel-head .small{{color:var(--muted);font-size:13px;line-height:1.5}}
+.preview-box{{
+  width:100%;
+  height:76vh;
+  overflow:auto;
+  background:#111;
+  display:flex;
+  justify-content:center;
+  align-items:flex-start;
+  padding:12px;
+}}
+.pdf-preview{{
+  max-width:100%;
+  height:auto;
+  background:#fff;
+  border-radius:8px;
+  box-shadow:0 8px 30px rgba(0,0,0,.3);
+}}
 .preview-iframe{{
   width:100%;
   height: 76vh;
@@ -1242,7 +1271,7 @@ textarea:focus,input[type="text"]:focus{{border-color:rgba(120,215,255,.4);box-s
     <section class="panel">
       <div class="panel-head">
         <div>
-          <h2>Preview sumber asli</h2>
+          <h2>{preview_mode_label}</h2>
           <div class="small">Path: {current_path}<br>JSON: {json_path}</div>
         </div>
         <div class="buttons">
@@ -1250,7 +1279,7 @@ textarea:focus,input[type="text"]:focus{{border-color:rgba(120,215,255,.4);box-s
           <a class="secondary" href="/sources/{quote(str(book_id))}/pages/{source_page_num}?theme={theme}&font={font_size}&q={quote(q)}">Refresh sumber</a>
         </div>
       </div>
-      <iframe class="preview-iframe" src="{preview_url}" title="Preview sumber asli"></iframe>
+      {preview_widget_html}
     </section>
 
     <section class="panel">
@@ -3399,6 +3428,39 @@ def source_page_view(book_id: str, page_num: int, theme: str = "dark", font: int
             query=q,
         )
     )
+
+
+@app.get("/sources/{book_id}/pages/{page_num}/image")
+def source_page_image(book_id: str, page_num: int, zoom: float = 2.0):
+    loaded = _load_book_record(book_id)
+    if not loaded:
+        raise HTTPException(status_code=404, detail="not found")
+
+    record = loaded["record"]
+    source_path = _resolve_source_path(record) or record.get("source_path", "")
+    if not source_path:
+        raise HTTPException(status_code=404, detail="source file not found")
+
+    source_path = str(source_path)
+    if not source_path.lower().endswith(".pdf"):
+        raise HTTPException(status_code=400, detail="source preview image is only supported for PDF")
+    if not os.path.exists(source_path):
+        raise HTTPException(status_code=404, detail="source PDF not found")
+
+    try:
+        doc = fitz.open(source_path)
+        if len(doc) <= 0:
+            raise HTTPException(status_code=404, detail="empty PDF")
+        page_index = max(0, min(int(page_num) - 1, len(doc) - 1))
+        page = doc.load_page(page_index)
+        zoom = max(1.0, min(float(zoom or 2.0), 4.0))
+        matrix = fitz.Matrix(zoom, zoom)
+        pix = page.get_pixmap(matrix=matrix, alpha=False)
+        return Response(content=pix.tobytes("png"), media_type="image/png")
+    except HTTPException:
+        raise
+    except Exception as exc:
+        raise HTTPException(status_code=500, detail=f"failed to render PDF page: {exc}") from exc
 
 
 @app.get("/books/{book_id}/pages/{page_num}/review", response_class=HTMLResponse)
