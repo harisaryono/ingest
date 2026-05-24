@@ -1026,6 +1026,7 @@ def process_file(
     source_hash_cache: Dict,
     content_family_cache: Dict,
     file_timeout_seconds: int,
+    extract_timeout_seconds: int,
 ) -> Tuple[Optional[Dict], Optional[Dict], Optional[Dict], str]:
     outpath, relpath = make_output_path(source_label, input_dir, path)
     book_id = make_book_id(source_label, relpath)
@@ -1056,8 +1057,18 @@ def process_file(
             "hash-cache",
         )
 
-    pages, extractor = extract_pages(path, timeout_seconds=file_timeout_seconds)
-    log(f"[{path.name}] EXTRACT pages={len(pages)} extractor={extractor}")
+    log(f"[{path.name}] EXTRACT START timeout={extract_timeout_seconds}s")
+    try:
+        pages, extractor = run_with_timeout(
+            extract_timeout_seconds,
+            extract_pages,
+            path,
+            file_timeout_seconds,
+        )
+    except FileTimeoutError:
+        log(f"[{path.name}] EXTRACT TIMEOUT after {extract_timeout_seconds}s")
+        raise
+    log(f"[{path.name}] EXTRACT DONE pages={len(pages)} extractor={extractor}")
     if not pages:
         return (
             {
@@ -1295,6 +1306,7 @@ def main() -> None:
     parser.add_argument("--limit", type=int, default=0, help="process at most N files for testing")
     parser.add_argument("--file-timeout-seconds", type=int, default=int(os.getenv("IMPORT_FILE_TIMEOUT_SECONDS", "600")), help="skip a file if processing exceeds this many seconds")
     parser.add_argument("--hash-timeout-seconds", type=int, default=int(os.getenv("IMPORT_HASH_TIMEOUT_SECONDS", "120")), help="skip a file if hashing exceeds this many seconds")
+    parser.add_argument("--extract-timeout-seconds", type=int, default=int(os.getenv("IMPORT_EXTRACT_TIMEOUT_SECONDS", "300")), help="skip a file if extraction exceeds this many seconds")
     parser.add_argument("--log-file", default=os.getenv("IMPORT_ISLAMHOUSE_LOG_FILE", str(DEFAULT_LOG_FILE)), help="append progress output to this file")
     parser.add_argument("--skip-canonicalize", action="store_true", help="skip post-import family canonicalization")
     parser.add_argument("--no-prune-qdrant", action="store_true", help="keep Qdrant state untouched when canonicalizing")
@@ -1344,6 +1356,7 @@ def main() -> None:
     log(f"Inventory DB     : {Path(args.inventory_db).expanduser().resolve()}")
     log(f"File timeout     : {args.file_timeout_seconds}s")
     log(f"Hash timeout     : {args.hash_timeout_seconds}s")
+    log(f"Extract timeout  : {args.extract_timeout_seconds}s")
 
     processed = 0
     imported = 0
@@ -1406,6 +1419,7 @@ def main() -> None:
                 source_hash_cache,
                 content_family_cache,
                 args.file_timeout_seconds,
+                args.extract_timeout_seconds,
             )
         except FileTimeoutError as e:
             unsupported += 1
