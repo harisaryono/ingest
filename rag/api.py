@@ -48,6 +48,7 @@ from ingest_common import (
     save_state,
     release_book,
 )
+from metadata_store import record_review_action, upsert_book_and_pages, upsert_book, upsert_pages
 
 app = FastAPI(title="RAG Buku Islam", version="0.1.0")
 app.add_middleware(
@@ -3424,6 +3425,18 @@ def book_edit_save(book_id: str, req: JsonEditRequest):
         extra_record_updates=extra_record_updates,
     )
     updated_record.update(extra_record_updates)
+    try:
+        upsert_book_and_pages(merged_book, updated_record)
+        record_review_action(
+            book_id,
+            "edit",
+            scope="book",
+            reviewed_by="web_editor",
+            note="edited via web editor",
+            payload={"json_path": json_path, **extra_record_updates},
+        )
+    except Exception:
+        pass
 
     return {
         "ok": True,
@@ -3484,6 +3497,19 @@ def book_review_action(book_id: str, req: ReviewActionRequest):
                 content_entry = _build_content_index_entry(updated_book, updated_record, json_path)
                 content_index = _replace_content_index_entry(content_index, content_entry)
                 _save_json_file(_content_index_path(), content_index)
+            try:
+                upsert_book_and_pages(updated_book, updated_record)
+                record_review_action(
+                    book_id,
+                    action,
+                    scope="page",
+                    page_num=page_num,
+                    reviewed_by=req.reviewed_by or "",
+                    note=req.note or "",
+                    payload={"page_num": page_num, "promote_book": bool(req.promote_book)},
+                )
+            except Exception:
+                pass
 
         return {
             "ok": True,
@@ -3536,6 +3562,19 @@ def book_review_action(book_id: str, req: ReviewActionRequest):
         content_entry = _build_content_index_entry(updated_book, updated_record, json_path)
         content_index = _replace_content_index_entry(content_index, content_entry)
         _save_json_file(_content_index_path(), content_index)
+
+    try:
+        upsert_book_and_pages(updated_book, updated_record)
+        record_review_action(
+            book_id,
+            action,
+            scope="book",
+            reviewed_by=req.reviewed_by or "",
+            note=req.note or "",
+            payload={"action": action},
+        )
+    except Exception:
+        pass
 
     if action in {"approved_manual", "approved_lease"}:
         _refresh_lexical_cache()

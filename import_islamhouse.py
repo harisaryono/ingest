@@ -42,8 +42,13 @@ from typing import Dict, Iterable, List, Optional, Tuple
 
 from bs4 import BeautifulSoup
 from docx import Document
-import fitz
+try:
+    import fitz
+except Exception:  # pragma: no cover - optional OCR dependency
+    fitz = None
 from pdfminer.high_level import extract_text as pdf_extract_text
+
+from rag.metadata_store import connect as metadata_connect, upsert_book, upsert_pages
 
 SCRIPT_DIR = Path(__file__).resolve().parent
 DEFAULT_INPUT_DIR = Path("/media/harry/DATA250/Islamhouse")
@@ -409,6 +414,8 @@ def pdf_text_is_suspicious(pages: List[str], path: Path, extractor: str) -> bool
 def read_pdf_file_via_tesseract(path: Path, timeout_seconds: int | None = None) -> List[str]:
     if shutil.which("tesseract") is None:
         raise RuntimeError("tesseract not available")
+    if fitz is None:
+        raise RuntimeError("PyMuPDF/fitz not available")
 
     with tempfile.TemporaryDirectory(prefix="islamhouse-pdfocr-") as tmp:
         tmpdir = Path(tmp)
@@ -1948,6 +1955,11 @@ def main() -> None:
         )
         save_json(CONTENT_FAMILY_CACHE_PATH, content_family_cache)
         imported += 1
+
+        try:
+            upsert_book_and_pages(book_json, index_record)
+        except Exception as e:
+            log(f"[{i:04d}] WARN   metadata sqlite sync failed for {path.name}: {e}")
 
         save_json(INDEX_PATH, index)
         save_json(CONTENT_INDEX_PATH, {"total_files": len(catalog), "entries": catalog})
