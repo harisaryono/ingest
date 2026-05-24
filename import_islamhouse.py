@@ -58,6 +58,7 @@ DUPLICATE_REPORT_PATH = OUTPUT_DIR / "_duplicates.jsonl"
 QUALITY_REPORT_PATH = OUTPUT_DIR / "_quality_issues.jsonl"
 INDEX_PATH = OUTPUT_DIR / "_index.json"
 SOURCE_HASH_CACHE_PATH = DATABASE_DIR / "import_source_hash_cache.json"
+CONTENT_FAMILY_CACHE_PATH = DATABASE_DIR / "import_content_family_cache.json"
 LOG_FILE_HANDLE = None
 BOOTSTRAP_SOURCE_HASH_FROM_REPORTS = os.getenv("IMPORT_SOURCE_HASH_BOOTSTRAP_REPORTS", "0").lower() in {
     "1",
@@ -594,6 +595,21 @@ def load_source_hash_cache() -> Dict:
     return cache
 
 
+def load_content_family_cache() -> Dict:
+    cache = load_json(
+        CONTENT_FAMILY_CACHE_PATH,
+        {"version": 1, "bootstrapped": False, "families": {}, "content_hash_index": {}, "text_hash_index": {}},
+    )
+    if not isinstance(cache, dict):
+        cache = {"version": 1, "bootstrapped": False, "families": {}, "content_hash_index": {}, "text_hash_index": {}}
+    for key in ("families", "content_hash_index", "text_hash_index"):
+        if not isinstance(cache.get(key), dict):
+            cache[key] = {}
+    cache.setdefault("version", 1)
+    cache.setdefault("bootstrapped", False)
+    return cache
+
+
 def source_hash_cache_entry(record: Dict, status: str) -> Dict:
     return {
         "source_hash": record.get("source_hash", ""),
@@ -623,6 +639,118 @@ def source_hash_cache_put(cache: Dict, record: Dict, status: str) -> bool:
         return False
     files[source_hash] = source_hash_cache_entry(record, status)
     return True
+
+
+def family_entry_from_signature(record: Dict, signature: BookSignature) -> Dict:
+    return {
+        "family_key": signature.content_hash,
+        "canonical_json_path": record.get("json_path", ""),
+        "canonical_book_id": record.get("book_id", ""),
+        "canonical_source_hash": record.get("source_hash", ""),
+        "canonical_source_path": record.get("source_path", ""),
+        "canonical_title": record.get("title", ""),
+        "language": record.get("language", "unknown"),
+        "page_count": int(signature.page_count or 0),
+        "size_bytes": int(signature.size_bytes or 0),
+        "content_hash": signature.content_hash,
+        "text_hash": signature.text_hash,
+        "text_simhash": int(signature.text_simhash),
+        "page_hashes": list(signature.page_hashes),
+        "members": [],
+        "updated_at": datetime.now().isoformat(),
+    }
+
+
+def family_member_entry(record: Dict, signature: BookSignature, role: str, canonical_json_path: str, score: float = 1.0, reason: str = "") -> Dict:
+    return {
+        "source_hash": record.get("source_hash", ""),
+        "book_id": record.get("book_id", ""),
+        "json_path": record.get("json_path", ""),
+        "source_path": record.get("source_path", ""),
+        "source_relpath": record.get("source_relpath", ""),
+        "source_type": record.get("source_type", "unknown"),
+        "document_type": record.get("document_type", "book"),
+        "language": record.get("language", "unknown"),
+        "title": record.get("title", ""),
+        "size_bytes": int(record.get("size_bytes", 0) or 0),
+        "total_pages": int(signature.page_count or 0),
+        "content_hash": signature.content_hash,
+        "text_hash": signature.text_hash,
+        "text_simhash": int(signature.text_simhash),
+        "page_hashes": list(signature.page_hashes),
+        "role": role,
+        "canonical_json_path": canonical_json_path,
+        "duplicate_score": float(score or 0.0),
+        "duplicate_reason": reason or "",
+        "updated_at": datetime.now().isoformat(),
+    }
+
+
+def family_cache_put(cache: Dict, record: Dict, signature: BookSignature, role: str, canonical_json_path: Optional[str] = None, score: float = 1.0, reason: str = "") -> bool:
+    families = cache.setdefault("families", {})
+    content_index = cache.setdefault("content_hash_index", {})
+    text_index = cache.setdefault("text_hash_index", {})
+    family_key = signature.content_hash
+    family = families.get(family_key)
+    if family is None:
+        family = family_entry_from_signature(record, signature)
+        families[family_key] = family
+    if not family.get("canonical_json_path") and canonical_json_path:
+        family["canonical_json_path"] = canonical_json_path
+    if not family.get("canonical_book_id"):
+        family["canonical_book_id"] = record.get("book_id", "")
+    if not family.get("canonical_source_hash"):
+        family["canonical_source_hash"] = record.get("source_hash", "")
+    if not family.get("canonical_source_path"):
+        family["canonical_source_path"] = record.get("source_path", "")
+    family["language"] = record.get("language", family.get("language", "unknown"))
+    family["page_count"] = max(int(family.get("page_count", 0) or 0), int(signature.page_count or 0))
+    family["size_bytes"] = max(int(family.get("size_bytes", 0) or 0), int(signature.size_bytes or 0))
+    family["text_hash"] = signature.text_hash
+    family["text_simhash"] = int(signature.text_simhash)
+    family["updated_at"] = datetime.now().isoformat()
+    member = family_member_entry(record, signature, role, canonical_json_path or family.get("canonical_json_path", ""), score=score, reason=reason)
+    if member["source_hash"]:
+        existing = {m.get("source_hash") for m in family.setdefault("members", [])}
+        if member["source_hash"] not in existing:
+            family["members"].append(member)
+    content_index[signature.content_hash] = family_key
+    text_index[signature.text_hash] = family_key
+    return True
+
+
+def family_cache_lookup(cache: Dict, signature: BookSignature) -> Optional[Dict]:
+    families = cache.get("families", {})
+    family_key = cache.get("content_hash_index", {}).get(signature.content_hash)
+    if family_key and family_key in families:
+        return families[family_key]
+    family_key = cache.get("text_hash_index", {}).get(signature.text_hash)
+    if family_key and family_key in families:
+        return families[family_key]
+    return None
+
+
+def bootstrap_content_family_cache(cache: Dict, index: Dict, output_dir: Path) -> int:
+    added = 0
+    for record in index.get("files", []):
+        if not isinstance(record, dict):
+            continue
+        json_path = resolve_index_json_path(record, str(output_dir))
+        path = Path(json_path)
+        if not path.exists():
+            continue
+        try:
+            with path.open("r", encoding="utf-8") as f:
+                book = json.load(f)
+            pages = [p.get("content", "") for p in book.get("pages", [])]
+            signature = build_signature(pages, book.get("language", "unknown"), int(book.get("size_bytes", 0) or 0))
+            if family_cache_put(cache, book, signature, "canonical", canonical_json_path=record.get("json_path", "")):
+                added += 1
+        except Exception:
+            continue
+    cache["bootstrapped"] = True
+    cache["bootstrapped_at"] = datetime.now().isoformat()
+    return added
 
 
 def bootstrap_source_hash_cache(cache: Dict, index: Dict) -> int:
@@ -836,6 +964,7 @@ def process_file(
     keep_duplicates: bool,
     source_hash: str,
     source_hash_cache: Dict,
+    content_family_cache: Dict,
     file_timeout_seconds: int,
 ) -> Tuple[Optional[Dict], Optional[Dict], Optional[Dict], str]:
     outpath, relpath = make_output_path(source_label, input_dir, path)
@@ -891,6 +1020,30 @@ def process_file(
     language = detect_language(path)
     signature = build_signature(pages, language, path.stat().st_size)
     quality = analyze_quality(pages, language, path, extractor, path.stat().st_size)
+    family_match = family_cache_lookup(
+        content_family_cache,
+        signature,
+    )
+    if family_match:
+        return (
+            {
+                "__skip__": "content_family",
+                "source_hash": source_hash,
+                "source_path": source_path,
+                "source_relpath": source_relpath,
+                "source_ext": source_ext,
+                "source_type": source_type,
+                "document_type": document_type,
+                "book_id": book_id,
+                "cached_status": family_match.get("quality_status") or family_match.get("conversion_status") or "duplicate",
+                "cached_json_path": family_match.get("canonical_json_path", ""),
+                "cached_book_id": family_match.get("canonical_book_id", ""),
+                "family_key": family_match.get("family_key", signature.content_hash),
+            },
+            None,
+            None,
+            "content-family-cache",
+        )
     duplicate_of, score, reason = find_duplicate(
         {
             "page_hashes": signature.page_hashes,
@@ -1098,6 +1251,10 @@ def main() -> None:
     cache_added = bootstrap_source_hash_cache(source_hash_cache, index)
     if cache_added or not SOURCE_HASH_CACHE_PATH.exists() or not source_hash_cache.get("bootstrapped"):
         save_json(SOURCE_HASH_CACHE_PATH, source_hash_cache)
+    content_family_cache = load_content_family_cache()
+    family_added = bootstrap_content_family_cache(content_family_cache, index, OUTPUT_DIR)
+    if family_added or not CONTENT_FAMILY_CACHE_PATH.exists() or not content_family_cache.get("bootstrapped"):
+        save_json(CONTENT_FAMILY_CACHE_PATH, content_family_cache)
     files = scan_files(input_dir, args.recursive)
     if args.limit and args.limit > 0:
         files = files[: args.limit]
@@ -1111,6 +1268,8 @@ def main() -> None:
     log(f"Catalog entries  : {len(catalog)}")
     log(f"Hash cache files : {len(source_hash_cache.get('files', {}))}")
     log(f"Hash cache boot  : {'yes' if source_hash_cache.get('bootstrapped') else 'no'}")
+    log(f"Family cache     : {len(content_family_cache.get('families', {}))}")
+    log(f"Family cache boot: {'yes' if content_family_cache.get('bootstrapped') else 'no'}")
     log(f"File timeout     : {args.file_timeout_seconds}s")
 
     processed = 0
@@ -1157,6 +1316,7 @@ def main() -> None:
                 args.keep_duplicates,
                 source_hash,
                 source_hash_cache,
+                content_family_cache,
                 args.file_timeout_seconds,
             )
         except FileTimeoutError as e:
@@ -1228,6 +1388,36 @@ def main() -> None:
             )
             continue
 
+        if isinstance(book_json, dict) and book_json.get("__skip__") == "content_family":
+            skipped_source_hash += 1
+            family_record = {
+                "source_hash": book_json.get("source_hash", source_hash),
+                "source_path": book_json.get("source_path", str(path.resolve())),
+                "source_relpath": book_json.get("source_relpath", path.relative_to(input_dir).as_posix()),
+                "filename": path.name,
+                "source_ext": book_json.get("source_ext", path.suffix.lower()),
+                "source_type": book_json.get("source_type", source_type_from_path(path)),
+                "document_type": book_json.get("document_type", "book"),
+                "status": "skipped",
+                "reason": "content_family_seen",
+                "cached_status": book_json.get("cached_status", ""),
+                "cached_json_path": book_json.get("cached_json_path", ""),
+                "cached_book_id": book_json.get("cached_book_id", ""),
+                "family_key": book_json.get("family_key", ""),
+            }
+            write_jsonl(
+                QUALITY_REPORT_PATH,
+                {
+                    "kind": "content_family_skip",
+                    **family_record,
+                },
+            )
+            log(
+                f"[{i:04d}] FAMILYSKIP {path.name} "
+                f"-> {book_json.get('cached_json_path') or '-'} family={book_json.get('family_key') or '-'}"
+            )
+            continue
+
         if isinstance(book_json, dict) and book_json.get("__skip__") == "empty":
             unsupported += 1
             empty_record = {
@@ -1275,6 +1465,17 @@ def main() -> None:
             }
             if source_hash_cache_put(source_hash_cache, quarantine_record, "quarantine"):
                 save_json(SOURCE_HASH_CACHE_PATH, source_hash_cache)
+            signature = build_signature([p["content"] for p in book_json["pages"]], book_json["language"], book_json["size_bytes"])
+            family_cache_put(
+                content_family_cache,
+                book_json,
+                signature,
+                "quarantine",
+                canonical_json_path=book_json.get("json_path", ""),
+                score=1.0,
+                reason="quality_quarantine",
+            )
+            save_json(CONTENT_FAMILY_CACHE_PATH, content_family_cache)
             report_entry = {
                 "kind": "quality",
                 **book_json,
@@ -1302,6 +1503,7 @@ def main() -> None:
         if duplicate_of and not args.keep_duplicates:
             skipped_duplicates += 1
             duplicate_hits += 1
+            signature = build_signature([p["content"] for p in book_json["pages"]], book_json["language"], book_json["size_bytes"])
             duplicate_record = {
                 "source_hash": book_json["source_hash"],
                 "book_id": book_json["book_id"],
@@ -1317,6 +1519,16 @@ def main() -> None:
             }
             if source_hash_cache_put(source_hash_cache, duplicate_record, "duplicate"):
                 save_json(SOURCE_HASH_CACHE_PATH, source_hash_cache)
+            family_cache_put(
+                content_family_cache,
+                book_json,
+                signature,
+                "duplicate",
+                canonical_json_path=duplicate_of.get("json_path"),
+                score=dup_info["score"] if dup_info else 0.0,
+                reason=dup_info["reason"] if dup_info else "duplicate",
+            )
+            save_json(CONTENT_FAMILY_CACHE_PATH, content_family_cache)
             report_entry = {
                 "source_path": book_json["source_path"],
                 "source_relpath": book_json["source_relpath"],
@@ -1384,6 +1596,16 @@ def main() -> None:
         catalog = update_content_index(catalog, index_record, signature)
         if source_hash_cache_put(source_hash_cache, index_record, index_record.get("conversion_status", "imported")):
             save_json(SOURCE_HASH_CACHE_PATH, source_hash_cache)
+        family_cache_put(
+            content_family_cache,
+            book_json,
+            signature,
+            "canonical",
+            canonical_json_path=book_json.get("json_path", ""),
+            score=1.0,
+            reason="canonical_import",
+        )
+        save_json(CONTENT_FAMILY_CACHE_PATH, content_family_cache)
         imported += 1
 
         save_json(INDEX_PATH, index)
