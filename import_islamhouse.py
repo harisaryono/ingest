@@ -28,6 +28,7 @@ import json
 import os
 import re
 import shutil
+import sqlite3
 import subprocess
 import sys
 import signal
@@ -59,6 +60,12 @@ QUALITY_REPORT_PATH = OUTPUT_DIR / "_quality_issues.jsonl"
 INDEX_PATH = OUTPUT_DIR / "_index.json"
 SOURCE_HASH_CACHE_PATH = DATABASE_DIR / "import_source_hash_cache.json"
 CONTENT_FAMILY_CACHE_PATH = DATABASE_DIR / "import_content_family_cache.json"
+FILE_INVENTORY_DB_PATH = Path(
+    os.getenv(
+        "FILE_INVENTORY_DB",
+        "/media/harry/DATA120B/GIT/booksdb/file_inventory.db",
+    )
+)
 LOG_FILE_HANDLE = None
 BOOTSTRAP_SOURCE_HASH_FROM_REPORTS = os.getenv("IMPORT_SOURCE_HASH_BOOTSTRAP_REPORTS", "1").lower() in {
     "1",
@@ -608,6 +615,59 @@ def load_content_family_cache() -> Dict:
     cache.setdefault("version", 1)
     cache.setdefault("bootstrapped", False)
     return cache
+
+
+def load_inventory_hash_map(db_path: Path, root_path: Path) -> Dict[str, Dict]:
+    if not db_path.exists():
+        return {}
+
+    root_prefix = root_path.as_posix().rstrip("/") + "/"
+    inventory: Dict[str, Dict] = {}
+    try:
+        conn = sqlite3.connect(f"file:{db_path.as_posix()}?mode=ro", uri=True)
+        conn.row_factory = sqlite3.Row
+        try:
+            rows = conn.execute(
+                """
+                SELECT
+                  fp.full_path,
+                  fp.relative_path,
+                  fp.filename,
+                  fp.basename,
+                  fp.extension,
+                  f.content_hash,
+                  f.hash_algo,
+                  f.hash_status,
+                  f.size_bytes,
+                  f.hashed_at
+                FROM file_paths fp
+                JOIN files f ON f.id = fp.file_id
+                WHERE fp.full_path LIKE ?
+                  AND f.hash_status = 'done'
+                  AND f.content_hash IS NOT NULL
+                """,
+                (root_prefix + "%",),
+            ).fetchall()
+        finally:
+            conn.close()
+    except Exception:
+        return {}
+
+    for row in rows:
+        full_path = row["full_path"]
+        inventory[full_path] = {
+            "full_path": full_path,
+            "relative_path": row["relative_path"],
+            "filename": row["filename"],
+            "basename": row["basename"],
+            "extension": row["extension"],
+            "content_hash": row["content_hash"],
+            "hash_algo": row["hash_algo"],
+            "hash_status": row["hash_status"],
+            "size_bytes": int(row["size_bytes"] or 0),
+            "hashed_at": row["hashed_at"],
+        }
+    return inventory
 
 
 def source_hash_cache_entry(record: Dict, status: str) -> Dict:
@@ -1240,6 +1300,7 @@ def main() -> None:
     parser.add_argument("--no-prune-qdrant", action="store_true", help="keep Qdrant state untouched when canonicalizing")
     parser.add_argument("--refresh-hash-cache", action="store_true", help="rebuild the source hash cache at startup")
     parser.add_argument("--refresh-family-cache", action="store_true", help="rebuild the content family cache at startup")
+    parser.add_argument("--inventory-db", default=str(FILE_INVENTORY_DB_PATH), help="read-only file inventory database with precomputed hashes")
     args = parser.parse_args()
 
     open_log_file(Path(args.log_file) if args.log_file else None)
@@ -1261,6 +1322,7 @@ def main() -> None:
     if args.refresh_family_cache or not CONTENT_FAMILY_CACHE_PATH.exists() or not content_family_cache.get("bootstrapped"):
         family_added = bootstrap_content_family_cache(content_family_cache, index, OUTPUT_DIR)
         save_json(CONTENT_FAMILY_CACHE_PATH, content_family_cache)
+    inventory_hash_map = load_inventory_hash_map(Path(args.inventory_db).expanduser().resolve(), input_dir)
     files = scan_files(input_dir, args.recursive)
     if args.limit and args.limit > 0:
         files = files[: args.limit]
@@ -1278,6 +1340,8 @@ def main() -> None:
     log(f"Family cache boot: {'yes' if content_family_cache.get('bootstrapped') else 'no'}")
     log(f"Hash cache init  : {'refreshed' if cache_added else 'loaded'}")
     log(f"Family cache init: {'refreshed' if family_added else 'loaded'}")
+    log(f"Inventory hashes : {len(inventory_hash_map)}")
+    log(f"Inventory DB     : {Path(args.inventory_db).expanduser().resolve()}")
     log(f"File timeout     : {args.file_timeout_seconds}s")
     log(f"Hash timeout     : {args.hash_timeout_seconds}s")
 
@@ -1293,13 +1357,20 @@ def main() -> None:
     for i, path in enumerate(files, 1):
         processed += 1
         log(f"[{i:04d}] START  {path.name} size={path.stat().st_size}")
+        full_path = str(path.resolve())
+        inventory_entry = inventory_hash_map.get(full_path)
+        source_hash = ""
+        if inventory_entry and inventory_entry.get("hash_status") == "done" and inventory_entry.get("content_hash"):
+            source_hash = inventory_entry["content_hash"]
+            log(f"[{i:04d}] INVENT {path.name} sha256={source_hash[:12]}... from inventory")
         try:
-            source_hash = run_with_timeout(
-                args.hash_timeout_seconds,
-                sha256_file,
-                path,
-            )
-            log(f"[{i:04d}] HASH   {path.name} sha256={source_hash[:12]}...")
+            if not source_hash:
+                source_hash = run_with_timeout(
+                    args.hash_timeout_seconds,
+                    sha256_file,
+                    path,
+                )
+                log(f"[{i:04d}] HASH   {path.name} sha256={source_hash[:12]}...")
         except Exception as e:
             unsupported += 1
             log(f"[{i:04d}] HASHERR {path.name}: {e}")
