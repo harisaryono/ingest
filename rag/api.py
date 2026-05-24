@@ -1388,7 +1388,7 @@ textarea:focus,input[type="text"]:focus{{border-color:rgba(120,215,255,.4);box-s
   const pageJump = document.getElementById('pageJump');
   const tabButtons = Array.from(document.querySelectorAll('[data-tab-btn]'));
   const tabPanels = Array.from(document.querySelectorAll('[data-tab-panel]'));
-  const tabStorageKey = `review-tab:${bookId}:${pageNum}`;
+  const tabStorageKey = `review-tab:${{bookId}}:${{pageNum}}`;
   function setStatus(text) {{
     status.textContent = text;
   }}
