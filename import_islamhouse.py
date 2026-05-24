@@ -57,7 +57,18 @@ CONTENT_INDEX_PATH = OUTPUT_DIR / "_content_index.json"
 DUPLICATE_REPORT_PATH = OUTPUT_DIR / "_duplicates.jsonl"
 QUALITY_REPORT_PATH = OUTPUT_DIR / "_quality_issues.jsonl"
 INDEX_PATH = OUTPUT_DIR / "_index.json"
+SOURCE_HASH_CACHE_PATH = DATABASE_DIR / "import_source_hash_cache.json"
 LOG_FILE_HANDLE = None
+BOOTSTRAP_SOURCE_HASH_FROM_REPORTS = os.getenv("IMPORT_SOURCE_HASH_BOOTSTRAP_REPORTS", "0").lower() in {
+    "1",
+    "true",
+    "yes",
+    "on",
+}
+SOURCE_HASH_CACHE_BOOTSTRAP_REPORTS = (
+    (DUPLICATE_REPORT_PATH, "duplicate"),
+    (QUALITY_REPORT_PATH, "quality"),
+) if BOOTSTRAP_SOURCE_HASH_FROM_REPORTS else ()
 
 SUPPORTED_EXTS = {
     ".txt",
@@ -571,6 +582,113 @@ def save_json(path: Path, data) -> None:
     os.replace(tmp, path)
 
 
+def load_source_hash_cache() -> Dict:
+    cache = load_json(SOURCE_HASH_CACHE_PATH, {"version": 1, "bootstrapped": False, "files": {}})
+    if not isinstance(cache, dict):
+        cache = {"version": 1, "bootstrapped": False, "files": {}}
+    files = cache.get("files")
+    if not isinstance(files, dict):
+        cache["files"] = {}
+    cache.setdefault("version", 1)
+    cache.setdefault("bootstrapped", False)
+    return cache
+
+
+def source_hash_cache_entry(record: Dict, status: str) -> Dict:
+    return {
+        "source_hash": record.get("source_hash", ""),
+        "skip": True,
+        "status": status,
+        "book_id": record.get("book_id", ""),
+        "json_path": record.get("json_path", ""),
+        "source_path": record.get("source_path", ""),
+        "source_relpath": record.get("source_relpath", ""),
+        "source_ext": record.get("source_ext", ""),
+        "source_type": record.get("source_type", "unknown"),
+        "document_type": record.get("document_type", "book"),
+        "language": record.get("language", "unknown"),
+        "title": record.get("title", ""),
+        "size_bytes": int(record.get("size_bytes", 0) or 0),
+        "total_pages": int(record.get("total_pages", 0) or 0),
+        "updated_at": datetime.now().isoformat(),
+    }
+
+
+def source_hash_cache_put(cache: Dict, record: Dict, status: str) -> bool:
+    source_hash = record.get("source_hash", "")
+    if not source_hash:
+        return False
+    files = cache.setdefault("files", {})
+    if source_hash in files:
+        return False
+    files[source_hash] = source_hash_cache_entry(record, status)
+    return True
+
+
+def bootstrap_source_hash_cache(cache: Dict, index: Dict) -> int:
+    added = 0
+    files = cache.setdefault("files", {})
+    for record in index.get("files", []):
+        if not isinstance(record, dict):
+            continue
+        if source_hash_cache_put(cache, record, record.get("conversion_status", "imported")):
+            added += 1
+
+    for audit_path, fallback_status in SOURCE_HASH_CACHE_BOOTSTRAP_REPORTS:
+        if not audit_path.exists():
+            continue
+        try:
+            with audit_path.open("r", encoding="utf-8") as f:
+                for line in f:
+                    line = line.strip()
+                    if not line:
+                        continue
+                    try:
+                        entry = json.loads(line)
+                    except Exception:
+                        continue
+                    source_path = entry.get("source_path")
+                    if not source_path:
+                        continue
+                    path = Path(source_path)
+                    if not path.exists():
+                        continue
+                    try:
+                        source_hash = sha256_file(path)
+                    except Exception:
+                        continue
+                    if source_hash in files:
+                        continue
+                    record = {
+                        "source_hash": source_hash,
+                        "book_id": entry.get("book_id", ""),
+                        "json_path": entry.get("json_path", ""),
+                        "source_path": source_path,
+                        "source_relpath": entry.get("source_relpath", ""),
+                        "source_ext": entry.get("source_ext", path.suffix.lower()),
+                        "source_type": entry.get("source_type", source_type_from_path(path)),
+                        "document_type": entry.get("document_type", "book"),
+                        "language": entry.get("language", "unknown"),
+                        "title": entry.get("title", ""),
+                        "size_bytes": int(entry.get("size_bytes", path.stat().st_size) or 0),
+                        "total_pages": int(entry.get("total_pages", 0) or 0),
+                    }
+                    status = (
+                        entry.get("conversion_status")
+                        or entry.get("quality_status")
+                        or entry.get("status")
+                        or fallback_status
+                    )
+                    files[source_hash] = source_hash_cache_entry(record, status)
+                    added += 1
+        except Exception:
+            continue
+
+    cache["bootstrapped"] = True
+    cache["bootstrapped_at"] = datetime.now().isoformat()
+    return added
+
+
 def build_content_catalog(index_records: List[Dict], output_dir: Path) -> List[Dict]:
     catalog: List[Dict] = []
     for record in index_records:
@@ -716,14 +834,10 @@ def process_file(
     catalog: List[Dict],
     threshold: float,
     keep_duplicates: bool,
+    source_hash: str,
+    source_hash_cache: Dict,
     file_timeout_seconds: int,
 ) -> Tuple[Optional[Dict], Optional[Dict], Optional[Dict], str]:
-    pages, extractor = extract_pages(path, timeout_seconds=file_timeout_seconds)
-    if not pages:
-        return None, None, None, extractor
-
-    language = detect_language(path)
-    signature = build_signature(pages, language, path.stat().st_size)
     outpath, relpath = make_output_path(source_label, input_dir, path)
     book_id = make_book_id(source_label, relpath)
     source_path = str(path.resolve())
@@ -731,6 +845,51 @@ def process_file(
     source_ext = path.suffix.lower()
     source_type = source_type_from_path(path)
     document_type = "html_document" if source_type == "html" else "book"
+
+    cache_entry = source_hash and source_hash_cache.get("files", {}).get(source_hash)
+    if cache_entry and cache_entry.get("skip", True):
+        return (
+            {
+                "__skip__": "source_hash",
+                "source_hash": source_hash,
+                "source_path": source_path,
+                "source_relpath": source_relpath,
+                "source_ext": source_ext,
+                "source_type": source_type,
+                "document_type": document_type,
+                "book_id": book_id,
+                "cached_status": cache_entry.get("status", ""),
+                "cached_json_path": cache_entry.get("json_path", ""),
+                "cached_book_id": cache_entry.get("book_id", ""),
+            },
+            None,
+            None,
+            "hash-cache",
+        )
+
+    pages, extractor = extract_pages(path, timeout_seconds=file_timeout_seconds)
+    if not pages:
+        return (
+            {
+                "__skip__": "empty",
+                "source_hash": source_hash,
+                "source_path": source_path,
+                "source_relpath": source_relpath,
+                "source_ext": source_ext,
+                "source_type": source_type,
+                "document_type": document_type,
+                "book_id": book_id,
+                "cached_status": "empty",
+                "cached_json_path": "",
+                "cached_book_id": "",
+            },
+            None,
+            None,
+            extractor,
+        )
+
+    language = detect_language(path)
+    signature = build_signature(pages, language, path.stat().st_size)
     quality = analyze_quality(pages, language, path, extractor, path.stat().st_size)
     duplicate_of, score, reason = find_duplicate(
         {
@@ -760,7 +919,7 @@ def process_file(
         "source_ext": source_ext,
         "source_type": source_type,
         "document_type": document_type,
-        "source_hash": sha256_file(path),
+        "source_hash": source_hash,
         "content_hash": signature.content_hash,
         "text_hash": signature.text_hash,
         "text_simhash": signature.text_simhash,
@@ -935,6 +1094,10 @@ def main() -> None:
     OUTPUT_DIR.joinpath(args.source_label).mkdir(parents=True, exist_ok=True)
 
     index, catalog = load_catalog(OUTPUT_DIR)
+    source_hash_cache = load_source_hash_cache()
+    cache_added = bootstrap_source_hash_cache(source_hash_cache, index)
+    if cache_added or not SOURCE_HASH_CACHE_PATH.exists() or not source_hash_cache.get("bootstrapped"):
+        save_json(SOURCE_HASH_CACHE_PATH, source_hash_cache)
     files = scan_files(input_dir, args.recursive)
     if args.limit and args.limit > 0:
         files = files[: args.limit]
@@ -946,11 +1109,14 @@ def main() -> None:
     log("File order       : size ascending (large files last)")
     log(f"Existing books   : {len(index.get('files', []))}")
     log(f"Catalog entries  : {len(catalog)}")
+    log(f"Hash cache files : {len(source_hash_cache.get('files', {}))}")
+    log(f"Hash cache boot  : {'yes' if source_hash_cache.get('bootstrapped') else 'no'}")
     log(f"File timeout     : {args.file_timeout_seconds}s")
 
     processed = 0
     imported = 0
     skipped_duplicates = 0
+    skipped_source_hash = 0
     quarantined = 0
     unsupported = 0
     duplicate_hits = 0
@@ -958,6 +1124,27 @@ def main() -> None:
 
     for i, path in enumerate(files, 1):
         processed += 1
+        try:
+            source_hash = sha256_file(path)
+        except Exception as e:
+            unsupported += 1
+            log(f"[{i:04d}] HASHERR {path.name}: {e}")
+            write_jsonl(
+                QUALITY_REPORT_PATH,
+                {
+                    "kind": "hash_error",
+                    "source_path": str(path.resolve()),
+                    "source_relpath": path.relative_to(input_dir).as_posix(),
+                    "filename": path.name,
+                    "source_ext": path.suffix.lower(),
+                    "source_type": source_type_from_path(path),
+                    "document_type": "html_document" if source_type_from_path(path) == "html" else "book",
+                    "status": "skipped",
+                    "reason": "source_hash_error",
+                    "error": str(e),
+                },
+            )
+            continue
         try:
             book_json, duplicate_of, dup_info, extractor = run_with_timeout(
                 args.file_timeout_seconds,
@@ -968,14 +1155,31 @@ def main() -> None:
                 catalog,
                 args.duplicate_threshold,
                 args.keep_duplicates,
+                source_hash,
+                source_hash_cache,
                 args.file_timeout_seconds,
             )
         except FileTimeoutError as e:
             unsupported += 1
+            timeout_record = {
+                "source_hash": source_hash,
+                "source_path": str(path.resolve()),
+                "source_relpath": path.relative_to(input_dir).as_posix(),
+                "filename": path.name,
+                "source_ext": path.suffix.lower(),
+                "source_type": source_type_from_path(path),
+                "document_type": "html_document" if source_type_from_path(path) == "html" else "book",
+                "language": detect_language(path),
+                "title": clean_title(path.stem),
+                "size_bytes": path.stat().st_size,
+            }
+            if source_hash_cache_put(source_hash_cache, timeout_record, "timeout"):
+                save_json(SOURCE_HASH_CACHE_PATH, source_hash_cache)
             write_jsonl(
                 QUALITY_REPORT_PATH,
                 {
                     "kind": "timeout",
+                    "source_hash": source_hash,
                     "source_path": str(path.resolve()),
                     "source_relpath": path.relative_to(input_dir).as_posix(),
                     "filename": path.name,
@@ -995,6 +1199,60 @@ def main() -> None:
             log(f"[{i:04d}] ERROR  {path.name}: {e}")
             continue
 
+        if isinstance(book_json, dict) and book_json.get("__skip__") == "source_hash":
+            skipped_source_hash += 1
+            skip_record = {
+                "source_hash": book_json.get("source_hash", source_hash),
+                "source_path": book_json.get("source_path", str(path.resolve())),
+                "source_relpath": book_json.get("source_relpath", path.relative_to(input_dir).as_posix()),
+                "filename": path.name,
+                "source_ext": book_json.get("source_ext", path.suffix.lower()),
+                "source_type": book_json.get("source_type", source_type_from_path(path)),
+                "document_type": book_json.get("document_type", "book"),
+                "status": "skipped",
+                "reason": "source_hash_seen",
+                "cached_status": book_json.get("cached_status", ""),
+                "cached_json_path": book_json.get("cached_json_path", ""),
+                "cached_book_id": book_json.get("cached_book_id", ""),
+            }
+            write_jsonl(
+                QUALITY_REPORT_PATH,
+                {
+                    "kind": "source_hash_skip",
+                    **skip_record,
+                },
+            )
+            log(
+                f"[{i:04d}] HASHSKIP {path.name} "
+                f"-> {book_json.get('cached_json_path') or '-'} status={book_json.get('cached_status') or '-'}"
+            )
+            continue
+
+        if isinstance(book_json, dict) and book_json.get("__skip__") == "empty":
+            unsupported += 1
+            empty_record = {
+                "source_hash": book_json.get("source_hash", source_hash),
+                "source_path": book_json.get("source_path", str(path.resolve())),
+                "source_relpath": book_json.get("source_relpath", path.relative_to(input_dir).as_posix()),
+                "filename": path.name,
+                "source_ext": book_json.get("source_ext", path.suffix.lower()),
+                "source_type": book_json.get("source_type", source_type_from_path(path)),
+                "document_type": book_json.get("document_type", "book"),
+                "status": "skipped",
+                "reason": "empty_after_extraction",
+            }
+            if source_hash_cache_put(source_hash_cache, empty_record, "empty"):
+                save_json(SOURCE_HASH_CACHE_PATH, source_hash_cache)
+            write_jsonl(
+                QUALITY_REPORT_PATH,
+                {
+                    "kind": "empty_after_extraction",
+                    **empty_record,
+                },
+            )
+            log(f"[{i:04d}] SKIP   {path.name} (empty after extraction)")
+            continue
+
         if book_json is None:
             unsupported += 1
             log(f"[{i:04d}] SKIP   {path.name} (empty after extraction)")
@@ -1002,6 +1260,21 @@ def main() -> None:
 
         if book_json.get("quality_status") == "quarantine":
             quarantined += 1
+            quarantine_record = {
+                "source_hash": book_json["source_hash"],
+                "book_id": book_json["book_id"],
+                "json_path": book_json["json_path"],
+                "source_path": book_json["source_path"],
+                "source_relpath": book_json["source_relpath"],
+                "source_ext": book_json.get("source_ext", ""),
+                "source_type": book_json.get("source_type", "unknown"),
+                "document_type": book_json.get("document_type", "book"),
+                "language": book_json["language"],
+                "title": book_json["title"],
+                "size_bytes": book_json["size_bytes"],
+            }
+            if source_hash_cache_put(source_hash_cache, quarantine_record, "quarantine"):
+                save_json(SOURCE_HASH_CACHE_PATH, source_hash_cache)
             report_entry = {
                 "kind": "quality",
                 **book_json,
@@ -1029,6 +1302,21 @@ def main() -> None:
         if duplicate_of and not args.keep_duplicates:
             skipped_duplicates += 1
             duplicate_hits += 1
+            duplicate_record = {
+                "source_hash": book_json["source_hash"],
+                "book_id": book_json["book_id"],
+                "json_path": book_json["json_path"],
+                "source_path": book_json["source_path"],
+                "source_relpath": book_json["source_relpath"],
+                "source_ext": book_json.get("source_ext", ""),
+                "source_type": book_json.get("source_type", "unknown"),
+                "document_type": book_json.get("document_type", "book"),
+                "language": book_json["language"],
+                "title": book_json["title"],
+                "size_bytes": book_json["size_bytes"],
+            }
+            if source_hash_cache_put(source_hash_cache, duplicate_record, "duplicate"):
+                save_json(SOURCE_HASH_CACHE_PATH, source_hash_cache)
             report_entry = {
                 "source_path": book_json["source_path"],
                 "source_relpath": book_json["source_relpath"],
@@ -1036,6 +1324,7 @@ def main() -> None:
                 "source_type": book_json.get("source_type", "unknown"),
                 "document_type": book_json.get("document_type", "book"),
                 "conversion_status": book_json.get("conversion_status", "unknown"),
+                "source_hash": book_json.get("source_hash", ""),
                 "duplicate_of": duplicate_of.get("json_path"),
                 "duplicate_title": duplicate_of.get("title"),
                 "score": dup_info["score"] if dup_info else 0.0,
@@ -1093,6 +1382,8 @@ def main() -> None:
         update_index(index, index_record)
         signature = build_signature([p["content"] for p in book_json["pages"]], book_json["language"], book_json["size_bytes"])
         catalog = update_content_index(catalog, index_record, signature)
+        if source_hash_cache_put(source_hash_cache, index_record, index_record.get("conversion_status", "imported")):
+            save_json(SOURCE_HASH_CACHE_PATH, source_hash_cache)
         imported += 1
 
         save_json(INDEX_PATH, index)
@@ -1113,6 +1404,7 @@ def main() -> None:
     log(f"Quality quarantined : {quarantined}")
     log(f"Quality warnings    : {quality_warned}")
     log(f"Skipped duplicates  : {skipped_duplicates}")
+    log(f"Skipped hash cache  : {skipped_source_hash}")
     log(f"Unsupported/empty   : {unsupported}")
     log(f"Duplicate matches   : {duplicate_hits}")
     log(f"Index path          : {INDEX_PATH}")
