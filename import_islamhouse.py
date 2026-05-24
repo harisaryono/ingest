@@ -20,6 +20,7 @@ was already present in the corpus or what failed quality checks.
 
 from __future__ import annotations
 
+import atexit
 import argparse
 import hashlib
 import html as html_lib
@@ -34,6 +35,7 @@ import tempfile
 import unicodedata
 import zipfile
 from dataclasses import dataclass
+from datetime import datetime
 from pathlib import Path
 from typing import Dict, Iterable, List, Optional, Tuple
 
@@ -49,11 +51,13 @@ DATABASE_DIR = Path(
         str(Path(__file__).resolve().parent.parent.parent / "DATABASE"),
     )
 )
+DEFAULT_LOG_FILE = DATABASE_DIR / "import_islamhouse.log"
 OUTPUT_DIR = DATABASE_DIR / "json_output"
 CONTENT_INDEX_PATH = OUTPUT_DIR / "_content_index.json"
 DUPLICATE_REPORT_PATH = OUTPUT_DIR / "_duplicates.jsonl"
 QUALITY_REPORT_PATH = OUTPUT_DIR / "_quality_issues.jsonl"
 INDEX_PATH = OUTPUT_DIR / "_index.json"
+LOG_FILE_HANDLE = None
 
 SUPPORTED_EXTS = {
     ".txt",
@@ -111,6 +115,9 @@ class BookSignature:
 
 def log(message: str) -> None:
     print(message, flush=True)
+    if LOG_FILE_HANDLE is not None:
+        LOG_FILE_HANDLE.write(message + "\n")
+        LOG_FILE_HANDLE.flush()
 
 
 def sha256_text(text: str) -> str:
@@ -680,10 +687,18 @@ def scan_files(input_dir: Path, recursive: bool) -> List[Path]:
         paths = [p for p in input_dir.rglob("*") if p.is_file()]
     else:
         paths = [p for p in input_dir.iterdir() if p.is_file()]
-    return sorted(
+    files = [
         p for p in paths
         if p.suffix.lower() in SUPPORTED_EXTS
         and not p.name.startswith(".~lock.")
+    ]
+    return sorted(
+        files,
+        key=lambda p: (
+            p.stat().st_size,
+            p.suffix.lower(),
+            p.as_posix(),
+        ),
     )
 
 
@@ -870,6 +885,32 @@ def run_canonicalizer(prune_qdrant: bool = True) -> int:
     return proc.returncode
 
 
+def open_log_file(log_path: Path | None) -> None:
+    global LOG_FILE_HANDLE
+    if log_path is None:
+        return
+    log_path = Path(log_path).expanduser().resolve()
+    log_path.parent.mkdir(parents=True, exist_ok=True)
+    LOG_FILE_HANDLE = log_path.open("a", encoding="utf-8")
+    log(f"=== import_islamhouse started {datetime.now().isoformat()} ===")
+    log(f"Log file         : {log_path}")
+    atexit.register(_close_log_file)
+
+
+def _close_log_file() -> None:
+    global LOG_FILE_HANDLE
+    if LOG_FILE_HANDLE is None:
+        return
+    try:
+        log(f"=== import_islamhouse finished {datetime.now().isoformat()} ===")
+    except Exception:
+        pass
+    try:
+        LOG_FILE_HANDLE.close()
+    finally:
+        LOG_FILE_HANDLE = None
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(description="Import Islamhouse sources into json_output")
     parser.add_argument("--input-dir", default=str(DEFAULT_INPUT_DIR), help="source directory to scan")
@@ -880,10 +921,12 @@ def main() -> None:
     parser.add_argument("--duplicate-threshold", type=float, default=0.92, help="page overlap threshold for duplicate detection")
     parser.add_argument("--limit", type=int, default=0, help="process at most N files for testing")
     parser.add_argument("--file-timeout-seconds", type=int, default=int(os.getenv("IMPORT_FILE_TIMEOUT_SECONDS", "600")), help="skip a file if processing exceeds this many seconds")
+    parser.add_argument("--log-file", default=os.getenv("IMPORT_ISLAMHOUSE_LOG_FILE", str(DEFAULT_LOG_FILE)), help="append progress output to this file")
     parser.add_argument("--skip-canonicalize", action="store_true", help="skip post-import family canonicalization")
     parser.add_argument("--no-prune-qdrant", action="store_true", help="keep Qdrant state untouched when canonicalizing")
     args = parser.parse_args()
 
+    open_log_file(Path(args.log_file) if args.log_file else None)
     input_dir = Path(args.input_dir).expanduser().resolve()
     if not input_dir.exists():
         raise SystemExit(f"Input directory not found: {input_dir}")
@@ -900,6 +943,7 @@ def main() -> None:
     log(f"Output dir       : {OUTPUT_DIR}")
     log(f"Source label     : {args.source_label}")
     log(f"Files discovered : {len(files)}")
+    log("File order       : size ascending (large files last)")
     log(f"Existing books   : {len(index.get('files', []))}")
     log(f"Catalog entries  : {len(catalog)}")
     log(f"File timeout     : {args.file_timeout_seconds}s")
