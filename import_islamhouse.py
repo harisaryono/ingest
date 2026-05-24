@@ -997,6 +997,7 @@ def process_file(
         )
 
     pages, extractor = extract_pages(path, timeout_seconds=file_timeout_seconds)
+    log(f"[{path.name}] EXTRACT pages={len(pages)} extractor={extractor}")
     if not pages:
         return (
             {
@@ -1285,12 +1286,14 @@ def main() -> None:
 
     for i, path in enumerate(files, 1):
         processed += 1
+        log(f"[{i:04d}] START  {path.name} size={path.stat().st_size}")
         try:
             source_hash = run_with_timeout(
                 args.hash_timeout_seconds,
                 sha256_file,
                 path,
             )
+            log(f"[{i:04d}] HASH   {path.name} sha256={source_hash[:12]}...")
         except Exception as e:
             unsupported += 1
             log(f"[{i:04d}] HASHERR {path.name}: {e}")
@@ -1311,6 +1314,7 @@ def main() -> None:
                 },
             )
             continue
+        log(f"[{i:04d}] READY  {path.name} hash={source_hash[:12]}...")
         try:
             book_json, duplicate_of, dup_info, extractor = run_with_timeout(
                 args.file_timeout_seconds,
