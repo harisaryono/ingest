@@ -51,6 +51,14 @@ HADITH_REFERENCE_DIR = os.getenv(
     os.path.join(REFERENCE_DATA_DIR, "hadith"),
 )
 DORAR_API_URL = os.getenv("DORAR_API_URL", "https://dorar.net/dorar_api.json")
+TESSERACT_BIN = os.getenv("TESSERACT_BIN", "tesseract")
+ARABIC_REVIEW_DIR = os.getenv(
+    "ARABIC_REVIEW_DIR",
+    os.path.join(DATABASE_DIR, "arabic_blocks"),
+)
+ARABIC_OCR_TSV_LANG = os.getenv("ARABIC_OCR_TSV_LANG", "ara+eng")
+ARABIC_OCR_BLOCK_LANG = os.getenv("ARABIC_OCR_BLOCK_LANG", "ara")
+ARABIC_OCR_PSM = int(os.getenv("ARABIC_OCR_PSM", "6"))
 
 DEFAULT_TOP_K = 5
 RETRIEVAL_CANDIDATES = 20

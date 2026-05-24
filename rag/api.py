@@ -1,4 +1,4 @@
-from fastapi import FastAPI, HTTPException
+from fastapi import FastAPI, HTTPException, Body
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
 from fastapi.responses import JSONResponse, HTMLResponse, Response
@@ -30,6 +30,13 @@ from config import JSON_DIR, QDRANT_PATH, COLLECTION_NAME, LEXICAL_INDEX_PATH
 import retriever as retriever_module
 from retriever import retrieve
 from generator import generate, extract_sources, generate_local, generate_remote
+from arabic_blocks import (
+    detect_arabic_blocks,
+    get_cached_crop_path,
+    load_cached_arabic_blocks,
+    ocr_arabic_crop,
+    update_cached_arabic_block,
+)
 from reference_replace import apply_reference_markers, search_dorar_candidates, search_local_hadith
 from ingest_common import (
     infer_conversion_status,
@@ -1070,6 +1077,8 @@ def _render_page_review_html(record: Dict, book: Dict, page: Dict, page_num: int
         else f"/sources/{quote(str(book_id))}/pages/{source_page_num}?theme={theme}&font={font_size}&q={quote(q)}"
     )
     preview_mode_label = "Gambar asli PDF" if preview_is_pdf else "Preview sumber asli"
+    arabic_tab_note = "Deteksi blok Arab tersedia untuk sumber PDF. Klik tombol untuk membuat cache crop dan OCR per blok." if preview_is_pdf else "Deteksi blok Arab hanya tersedia untuk sumber PDF."
+    arabic_disabled_attr = "" if preview_is_pdf else "disabled"
     preview_widget_html = (
         f'<div class="preview-box"><img class="pdf-preview" src="{preview_url}" alt="Preview halaman sumber {source_page_num}"></div>'
         if preview_is_pdf
@@ -1237,6 +1246,20 @@ textarea:focus,input[type="text"]:focus{{border-color:rgba(120,215,255,.4);box-s
 .status{{color:var(--muted);font-size:13px;line-height:1.5}}
 .draft{{min-height:14vh}}
 .readout{{white-space:pre-wrap;font-family:ui-monospace,SFMono-Regular,Menlo,Monaco,Consolas,"Liberation Mono","Courier New",monospace;font-size:13px;line-height:1.6;padding:14px;border-radius:16px;border:1px solid var(--line);background:rgba(0,0,0,.18);color:#dfe9f7}}
+.arabic-grid{{display:grid;gap:12px}}
+.arabic-card{{border:1px solid var(--line);border-radius:18px;background:rgba(255,255,255,.03);padding:14px;display:grid;gap:10px}}
+.arabic-card-head{{display:flex;flex-wrap:wrap;gap:8px;align-items:center;justify-content:space-between}}
+.arabic-card-title{{font-weight:700;font-size:14px}}
+.arabic-badges{{display:flex;flex-wrap:wrap;gap:8px;align-items:center}}
+.arabic-badge{{font-size:11px;border-radius:999px;padding:3px 8px;background:rgba(120,215,255,.14);color:var(--accent);border:1px solid rgba(120,215,255,.24)}}
+.arabic-badge.ok{{background:rgba(34,197,94,.12);color:#4ade80;border-color:rgba(34,197,94,.24)}}
+.arabic-badge.warn{{background:rgba(251,191,36,.12);color:#fbbf24;border-color:rgba(251,191,36,.24)}}
+.arabic-crop{{width:100%;max-height:260px;object-fit:contain;background:#fff;border-radius:12px;border:1px solid rgba(255,255,255,.08)}}
+.arabic-text{{white-space:pre-wrap;line-height:1.8;padding:12px;border-radius:14px;border:1px solid var(--line);background:rgba(0,0,0,.18);color:#e8eef7}}
+.arabic-actions{{display:flex;flex-wrap:wrap;gap:8px}}
+.arabic-actions button{{border-radius:12px;border:none;background:linear-gradient(135deg,var(--accent),var(--accent-2));color:#071018;font-weight:700;padding:10px 14px;cursor:pointer;font-size:13px}}
+.arabic-actions button.secondary{{background:var(--panel-2);color:var(--text);border:1px solid var(--line)}}
+.arabic-actions button:disabled,.tab-btn:disabled,.toolbar a:disabled{{opacity:.55;cursor:not-allowed}}
 @media (max-width: 1140px){{
   .workspace{{grid-template-columns:1fr}}
   .preview-iframe{{height:58vh}}
@@ -1298,6 +1321,7 @@ textarea:focus,input[type="text"]:focus{{border-color:rgba(120,215,255,.4);box-s
           <button class="tab-btn active" type="button" data-tab-btn="edit">Edit</button>
           <button class="tab-btn" type="button" data-tab-btn="marker">Marker</button>
           <button class="tab-btn" type="button" data-tab-btn="hadith">Hadits</button>
+          <button class="tab-btn" type="button" data-tab-btn="arabic" {arabic_disabled_attr}>Arabic</button>
           <button class="tab-btn" type="button" data-tab-btn="repair">Repair</button>
           <button class="tab-btn" type="button" data-tab-btn="metadata">Metadata</button>
         </div>
@@ -1364,6 +1388,23 @@ textarea:focus,input[type="text"]:focus{{border-color:rgba(120,215,255,.4);box-s
             </div>
           </section>
 
+          <section class="tab-panel" data-tab-panel="arabic">
+            <div class="group">
+              <div class="label">Deteksi blok Arab</div>
+              <div class="status">{html_lib.escape(arabic_tab_note)}</div>
+            </div>
+            <div class="panel-actions">
+              <button id="detectArabicBlocks" type="button" class="secondary" {arabic_disabled_attr}>Deteksi blok Arab</button>
+              <button id="reloadArabicBlocks" type="button" class="secondary" {arabic_disabled_attr}>Muat cache</button>
+            </div>
+            <div class="group">
+              <div class="label">Hasil blok Arab</div>
+              <div id="arabicBlocksResults" class="arabic-grid">
+                <div class="status">Belum ada hasil deteksi.</div>
+              </div>
+            </div>
+          </section>
+
           <section class="tab-panel" data-tab-panel="repair">
             <div class="group">
               <div class="label">Permintaan repair draft</div>
@@ -1412,12 +1453,16 @@ textarea:focus,input[type="text"]:focus{{border-color:rgba(120,215,255,.4);box-s
   const localHadithQuery = document.getElementById('localHadithQuery');
   const localHadithCollection = document.getElementById('localHadithCollection');
   const localHadithResults = document.getElementById('localHadithResults');
+  const arabicBlocksResults = document.getElementById('arabicBlocksResults');
+  const detectArabicBlocksBtn = document.getElementById('detectArabicBlocks');
+  const reloadArabicBlocksBtn = document.getElementById('reloadArabicBlocks');
   const autoDorarFirst = document.getElementById('autoDorarFirst');
   const status = document.getElementById('status');
   const pageJump = document.getElementById('pageJump');
   const tabButtons = Array.from(document.querySelectorAll('[data-tab-btn]'));
   const tabPanels = Array.from(document.querySelectorAll('[data-tab-panel]'));
   const tabStorageKey = `review-tab:${{bookId}}:${{pageNum}}`;
+  const sourceType = {json.dumps(str(source_type))};
   function setStatus(text) {{
     status.textContent = text;
   }}
@@ -1523,6 +1568,7 @@ textarea:focus,input[type="text"]:focus{{border-color:rgba(120,215,255,.4);box-s
   let currentDorarMap = {{}};
   let currentDorarChoices = {{}};
   let currentLocalHadithMap = {{}};
+  let currentArabicBlocks = [];
   async function postJson(url, body) {{
     const resp = await fetch(url, {{
       method: 'POST',
@@ -1627,6 +1673,86 @@ textarea:focus,input[type="text"]:focus{{border-color:rgba(120,215,255,.4);box-s
       }});
     }});
   }}
+  function renderArabicBlocks(blocks) {{
+    const items = Array.isArray(blocks) ? blocks : [];
+    const candidates = items.filter((block) => !!block.needs_arabic_ocr || /arabic|mixed/i.test(String(block.script_guess || '')));
+    if (!items.length) {{
+      arabicBlocksResults.innerHTML = '<div class="status">Belum ada hasil deteksi.</div>';
+      return;
+    }}
+    if (!candidates.length) {{
+      arabicBlocksResults.innerHTML = `<div class="status">Deteksi selesai, tetapi tidak ada blok Arab yang perlu OCR ulang. Total blok: ${{items.length}}.</div>`;
+      return;
+    }}
+    const cards = candidates.map((block) => {{
+      const blockId = escapeInline(block.block_id || '');
+      const scriptGuess = escapeInline(block.script_guess || 'unknown');
+      const confidence = block.confidence === null || block.confidence === undefined ? '' : String(block.confidence);
+      const text = escapeInline(block.ocr_text || block.text || '');
+      const bbox = Array.isArray(block.bbox) ? block.bbox.join(', ') : '';
+      const cropUrl = escapeInline(block.crop_url || '');
+      const statusLabel = escapeInline(block.ocr_status || 'unknown');
+      const dirStyle = /arabic/i.test(String(block.script_guess || '')) ? 'direction:rtl;text-align:right;' : '';
+      const badgeClass = /arabic/i.test(String(block.script_guess || '')) ? 'ok' : (String(block.script_guess || '') === 'mixed' ? 'warn' : '');
+      return `
+        <article class="arabic-card">
+          <div class="arabic-card-head">
+            <div>
+              <div class="arabic-card-title">${{blockId}}</div>
+              <div style="color:var(--muted);font-size:12px;">bbox: ${{bbox || '-'}}</div>
+            </div>
+            <div class="arabic-badges">
+              <span class="arabic-badge ${{badgeClass}}">${{scriptGuess}}</span>
+              ${{confidence ? `<span class="arabic-badge">conf ${{confidence}}</span>` : ''}}
+              <span class="arabic-badge">${{statusLabel}}</span>
+            </div>
+          </div>
+          <img class="arabic-crop" src="${{cropUrl}}" alt="Crop ${{blockId}}">
+          <div class="arabic-text" style="${{dirStyle}}">${{text || '(kosong)'}} </div>
+          <div class="arabic-actions">
+            <button type="button" class="secondary" data-ocr-arabic="${{blockId}}">OCR ulang</button>
+            <button type="button" data-insert-arabic="${{blockId}}">Sisipkan OCR</button>
+          </div>
+        </article>
+      `;
+    }}).join('');
+    arabicBlocksResults.innerHTML = `
+      <div class="status">Menampilkan ${{candidates.length}} kandidat blok Arab dari ${{items.length}} blok terdeteksi.</div>
+      ${{cards}}
+    `;
+    arabicBlocksResults.querySelectorAll('[data-insert-arabic]').forEach(btn => {{
+      btn.addEventListener('click', () => {{
+        const blockId = btn.dataset.insertArabic || '';
+        const block = currentArabicBlocks.find(item => String(item.block_id || '') === blockId);
+        if (!block) return;
+        const text = (block.ocr_text || block.text || '').trim();
+        if (!text) {{
+          setStatus(`Blok ${{blockId}} kosong.`);
+          return;
+        }}
+        insertAtCursor(pageContent, text);
+        setStatus(`Teks Arab dari blok ${{blockId}} disisipkan ke editor.`);
+      }});
+    }});
+    arabicBlocksResults.querySelectorAll('[data-ocr-arabic]').forEach(btn => {{
+      btn.addEventListener('click', async () => {{
+        const blockId = btn.dataset.ocrArabic || '';
+        if (!blockId) return;
+        try {{
+          setStatus(`OCR ulang blok ${{blockId}}...`);
+          const data = await postJson(`${{api}}/books/${{encodeURIComponent(bookId)}}/pages/${{pageNum}}/arabic-blocks/${{encodeURIComponent(blockId)}}/ocr`, {{}});
+          currentArabicBlocks = currentArabicBlocks.map(item => {{
+            if (String(item.block_id || '') !== blockId) return item;
+            return {{ ...item, ocr_text: data.ocr_text || '', ocr_status: data.ocr_status || 'ok' }};
+          }});
+          renderArabicBlocks(currentArabicBlocks);
+          setStatus(`OCR blok ${{blockId}} selesai.`);
+        }} catch (err) {{
+          setStatus(`OCR blok ${{blockId}} gagal: ${{err.message}}`);
+        }}
+      }});
+    }});
+  }}
   async function previewMarkers() {{
     setStatus('Membuat preview marker...');
     activateTab('marker');
@@ -1687,6 +1813,40 @@ textarea:focus,input[type="text"]:focus{{border-color:rgba(120,215,255,.4);box-s
     currentLocalHadithMap = {{ [query]: data.results || [] }};
     renderLocalHadithCandidates(currentLocalHadithMap);
     setStatus(`Hadits lokal menemukan ${{(data.results || []).length}} kandidat untuk query: ${{query}}`);
+  }}
+  async function detectArabicBlocks(force = false) {{
+    if (sourceType.toLowerCase() !== 'pdf') {{
+      setStatus('Deteksi blok Arab hanya tersedia untuk sumber PDF.');
+      return;
+    }}
+    activateTab('arabic');
+    setStatus(force ? 'Memaksa deteksi blok Arab...' : 'Mendeteksi blok Arab...');
+    const data = await postJson(`${{api}}/books/${{encodeURIComponent(bookId)}}/pages/${{pageNum}}/detect-arabic-blocks`, {{
+      zoom: 2.0,
+      force
+    }});
+    currentArabicBlocks = data.blocks || [];
+    renderArabicBlocks(currentArabicBlocks);
+    setStatus(`Deteksi blok Arab selesai. Total blok: ${{currentArabicBlocks.length}}; kandidat Arab: ${{data.counts?.arabic_or_mixed || 0}}`);
+    return data;
+  }}
+  async function loadArabicBlocksCache() {{
+    if (sourceType.toLowerCase() !== 'pdf') {{
+      setStatus('Cache blok Arab hanya tersedia untuk sumber PDF.');
+      return;
+    }}
+    try {{
+      const resp = await fetch(`${{api}}/books/${{encodeURIComponent(bookId)}}/pages/${{pageNum}}/arabic-blocks`);
+      if (!resp.ok) {{
+        throw new Error(`HTTP ${{resp.status}}`);
+      }}
+      const data = await resp.json();
+      currentArabicBlocks = data.blocks || [];
+      renderArabicBlocks(currentArabicBlocks);
+      setStatus(`Cache blok Arab dimuat. Total blok: ${{currentArabicBlocks.length}}`);
+    }} catch (err) {{
+      setStatus(`Muat cache blok Arab gagal: ${{err.message}}`);
+    }}
   }}
   document.getElementById('savePage').addEventListener('click', async () => {{
     try {{
@@ -1793,6 +1953,24 @@ textarea:focus,input[type="text"]:focus{{border-color:rgba(120,215,255,.4);box-s
       setStatus(`Cari hadits lokal gagal: ${{err.message}}`);
     }}
   }});
+  if (detectArabicBlocksBtn) {{
+    detectArabicBlocksBtn.addEventListener('click', async () => {{
+      try {{
+        await detectArabicBlocks(false);
+      }} catch (err) {{
+        setStatus(`Deteksi blok Arab gagal: ${{err.message}}`);
+      }}
+    }});
+  }}
+  if (reloadArabicBlocksBtn) {{
+    reloadArabicBlocksBtn.addEventListener('click', async () => {{
+      try {{
+        await loadArabicBlocksCache();
+      }} catch (err) {{
+        setStatus(`Muat cache blok Arab gagal: ${{err.message}}`);
+      }}
+    }});
+  }}
   document.getElementById('goPage').addEventListener('click', () => {{
     const next = parseInt(pageJump.value, 10);
     if (!Number.isFinite(next) || next < 1) return;
@@ -1808,6 +1986,8 @@ textarea:focus,input[type="text"]:focus{{border-color:rgba(120,215,255,.4);box-s
   renderDorarCandidates(currentDorarMap);
   currentLocalHadithMap = {{}};
   renderLocalHadithCandidates(currentLocalHadithMap);
+  currentArabicBlocks = [];
+  renderArabicBlocks(currentArabicBlocks);
   markerOutput.value = '';
   markerDiff.textContent = 'Belum ada preview marker.';
   tabButtons.forEach(btn => {{
@@ -3461,6 +3641,87 @@ def source_page_image(book_id: str, page_num: int, zoom: float = 2.0):
         raise
     except Exception as exc:
         raise HTTPException(status_code=500, detail=f"failed to render PDF page: {exc}") from exc
+
+
+def _load_pdf_for_arabic_blocks(book_id: str, page_num: int):
+    loaded = _load_book_record(book_id)
+    if not loaded:
+        raise HTTPException(status_code=404, detail="not found")
+    record = loaded["record"]
+    source_path = _resolve_source_path(record) or record.get("source_path", "")
+    if not source_path:
+        raise HTTPException(status_code=404, detail="source file not found")
+    source_path = str(source_path)
+    if not source_path.lower().endswith(".pdf"):
+        raise HTTPException(status_code=400, detail="arabic block detection is only supported for PDF sources")
+    if not os.path.exists(source_path):
+        raise HTTPException(status_code=404, detail="source PDF not found")
+    return loaded, record, source_path
+
+
+@app.post("/books/{book_id}/pages/{page_num}/detect-arabic-blocks")
+@app.post("/admin/books/{book_id}/pages/{page_num}/detect-arabic-blocks")
+def detect_arabic_blocks_endpoint(book_id: str, page_num: int, req: Dict | None = Body(default=None)):
+    loaded, record, source_path = _load_pdf_for_arabic_blocks(book_id, page_num)
+    zoom = 2.0
+    force = False
+    if isinstance(req, dict):
+        try:
+            zoom = float(req.get("zoom", zoom) or zoom)
+        except Exception:
+            zoom = 2.0
+        force = bool(req.get("force", False))
+    try:
+        data = detect_arabic_blocks(source_path, str(book_id), int(page_num), zoom=zoom, force=force)
+    except Exception as exc:
+        raise HTTPException(status_code=500, detail=f"failed to detect arabic blocks: {exc}") from exc
+    data["source_type"] = str(record.get("source_type") or infer_source_type(record))
+    data["source_path"] = source_path
+    return JSONResponse(data)
+
+
+@app.get("/books/{book_id}/pages/{page_num}/arabic-blocks")
+@app.get("/admin/books/{book_id}/pages/{page_num}/arabic-blocks")
+def get_arabic_blocks(book_id: str, page_num: int):
+    loaded, record, source_path = _load_pdf_for_arabic_blocks(book_id, page_num)
+    cache = load_cached_arabic_blocks(str(book_id), int(page_num))
+    if not cache:
+        raise HTTPException(status_code=404, detail="arabic blocks not detected yet")
+    cache["source_type"] = str(record.get("source_type") or infer_source_type(record))
+    cache["source_path"] = source_path
+    return JSONResponse(cache)
+
+
+@app.get("/books/{book_id}/pages/{page_num}/arabic-blocks/{block_id}/crop")
+@app.get("/admin/books/{book_id}/pages/{page_num}/arabic-blocks/{block_id}/crop")
+def get_arabic_block_crop(book_id: str, page_num: int, block_id: str):
+    _loaded, _record, _source_path = _load_pdf_for_arabic_blocks(book_id, page_num)
+    crop_path = get_cached_crop_path(str(book_id), int(page_num), block_id)
+    if not crop_path:
+        raise HTTPException(status_code=404, detail="arabic block crop not found")
+    if not os.path.exists(crop_path):
+        raise HTTPException(status_code=404, detail="arabic block crop file missing")
+    with open(crop_path, "rb") as f:
+        return Response(content=f.read(), media_type="image/png")
+
+
+@app.post("/books/{book_id}/pages/{page_num}/arabic-blocks/{block_id}/ocr")
+@app.post("/admin/books/{book_id}/pages/{page_num}/arabic-blocks/{block_id}/ocr")
+def ocr_arabic_block(book_id: str, page_num: int, block_id: str):
+    _loaded, _record, _source_path = _load_pdf_for_arabic_blocks(book_id, page_num)
+    crop_path = get_cached_crop_path(str(book_id), int(page_num), block_id)
+    if not crop_path:
+        raise HTTPException(status_code=404, detail="arabic block crop not found")
+    if not os.path.exists(crop_path):
+        raise HTTPException(status_code=404, detail="arabic block crop file missing")
+    try:
+        text = ocr_arabic_crop(crop_path)
+    except Exception as exc:
+        raise HTTPException(status_code=500, detail=f"failed to OCR arabic crop: {exc}") from exc
+    updated = update_cached_arabic_block(str(book_id), int(page_num), block_id, ocr_text=text, ocr_status="ok" if text else "empty")
+    if updated is None:
+        raise HTTPException(status_code=404, detail="arabic block not found")
+    return JSONResponse({"book_id": str(book_id), "page": int(page_num), "block_id": block_id, "ocr_text": text, "ocr_status": "ok" if text else "empty"})
 
 
 @app.get("/books/{book_id}/pages/{page_num}/review", response_class=HTMLResponse)
