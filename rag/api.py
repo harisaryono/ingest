@@ -2436,7 +2436,9 @@ def _render_library_html(page: int = 1, limit: int = 24, q: str = "", lang: str 
                 <div class="book-meta">
                   <span>{html_lib.escape(str(book_id))}</span>
                   <span>{total_pages} pages</span>
-                  <span>{html_lib.escape(record.get('filename', '-'))}</span>
+                  <span>{html_lib.escape(language)}</span>
+                  <span>{html_lib.escape(source_type)}</span>
+                  <span>{html_lib.escape(document_type)}</span>
                 </div>
                 <div class="book-badges">{''.join(badges)}</div>
                 </div>
@@ -2521,41 +2523,42 @@ h1{{margin:0;font-size:clamp(32px,6vw,58px);line-height:1}}
 .book-card{{
   display:grid;
   grid-template-columns:minmax(0,1fr) auto;
-  gap:16px;
+  gap:12px;
   align-items:flex-start;
   border:1px solid var(--line);
-  border-radius:20px;
-  background:linear-gradient(180deg, rgba(255,255,255,.04), rgba(255,255,255,.02));
-  padding:18px;
-  box-shadow:0 8px 30px rgba(0,0,0,.18);
+  border-radius:18px;
+  background:linear-gradient(180deg, rgba(255,255,255,.035), rgba(255,255,255,.018));
+  padding:14px 16px;
+  box-shadow:0 8px 24px rgba(0,0,0,.14);
 }}
-.book-title{{font-size:18px;font-weight:800;line-height:1.35}}
-.book-meta{{display:flex;flex-wrap:wrap;gap:10px;margin-top:6px;color:var(--muted);font-size:13px}}
-.book-badges{{display:flex;flex-wrap:wrap;gap:8px;margin-top:12px}}
+.book-title{{font-size:16px;font-weight:800;line-height:1.35}}
+.book-meta{{display:flex;flex-wrap:wrap;gap:8px;margin-top:6px;color:var(--muted);font-size:12px}}
+.book-badges{{display:flex;flex-wrap:wrap;gap:6px;margin-top:10px}}
 .badge{{
   display:inline-flex;
   align-items:center;
   gap:6px;
-  padding:6px 10px;
+  padding:5px 9px;
   border-radius:999px;
   border:1px solid var(--line);
   background:rgba(255,255,255,.03);
-  font-size:12px;
+  font-size:11px;
   color:var(--text);
 }}
 .badge.danger{{background:rgba(255,90,90,.16);color:#ffd6d6}}
 .badge.status-failed{{background:rgba(255,90,90,.12)}}
 .badge.status-good{{background:rgba(90,255,160,.12)}}
 .badge.status-pending_review{{background:rgba(255,210,90,.12)}}
-.book-actions{{display:flex;flex-wrap:wrap;gap:8px;justify-content:flex-end}}
+.book-actions{{display:flex;flex-wrap:wrap;gap:7px;justify-content:flex-end;align-items:flex-start}}
 .book-actions a{{
   border-radius:12px;
   border:none;
   background:linear-gradient(135deg,var(--accent),var(--accent-2));
   color:#071018;
   font-weight:700;
-  padding:10px 14px;
+  padding:9px 12px;
   text-decoration:none;
+  font-size:13px;
 }}
 .book-actions a.secondary{{background:var(--panel-2);color:var(--text);border:1px solid var(--line)}}
 .book-actions button{{
@@ -2564,8 +2567,9 @@ h1{{margin:0;font-size:clamp(32px,6vw,58px);line-height:1}}
   background:linear-gradient(135deg,var(--accent),var(--accent-2));
   color:#071018;
   font-weight:700;
-  padding:10px 14px;
+  padding:9px 12px;
   cursor:pointer;
+  font-size:13px;
 }}
 .book-actions button.secondary{{background:var(--panel-2);color:var(--text);border:1px solid var(--line)}}
 .book-actions button.danger{{background:linear-gradient(135deg,#fda4af,#fecaca)}}
@@ -2574,7 +2578,7 @@ h1{{margin:0;font-size:clamp(32px,6vw,58px);line-height:1}}
 .book-more summary{{cursor:pointer;list-style:none;padding:10px 14px;font-weight:700;color:var(--text);user-select:none}}
 .book-more summary::-webkit-details-marker{{display:none}}
 .book-more[open] summary{{border-bottom:1px solid var(--line)}}
-.book-actions.compact{{justify-content:flex-start;padding:12px 14px}}
+.book-actions.compact{{justify-content:flex-start;padding:10px 12px}}
 .book-actions.compact a,.book-actions.compact button{{padding:9px 12px;font-size:13px}}
 .empty{{padding:22px;border:1px dashed var(--line);border-radius:18px;color:var(--muted);background:rgba(255,255,255,.02)}}
 @media (max-width: 820px){{
