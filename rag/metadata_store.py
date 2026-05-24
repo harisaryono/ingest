@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import os
 import sqlite3
 from contextlib import contextmanager
 from datetime import datetime, timezone
@@ -157,6 +158,27 @@ def _bool(value) -> int:
     return 1 if bool(value) else 0
 
 
+def _sqlite_int64(value) -> int:
+    value = _int(value, 0)
+    if value >= 1 << 63:
+        value -= 1 << 64
+    if value < -(1 << 63):
+        value = -(1 << 63)
+    return value
+
+
+def _coalesce(*values, default=""):
+    for value in values:
+        if value is None:
+            continue
+        if isinstance(value, str):
+            if value.strip():
+                return value
+            continue
+        return value
+    return default
+
+
 @contextmanager
 def connect(db_path: str | None = None) -> Iterator[sqlite3.Connection]:
     path = Path(db_path or METADATA_DB_PATH)
@@ -176,7 +198,7 @@ def _page_metrics(page: Dict) -> Dict[str, object]:
     content_norm = " ".join(content.replace("\x0c", " ").replace("\xa0", " ").split())
     page_hash = _sha256_text(content_norm)
     page_text_hash = _sha256_text(content.strip())
-    page_simhash = _simhash(content_norm.split())
+    page_simhash = _sqlite_int64(_simhash(content_norm.split()))
     return {
         "content_len": len(content),
         "page_hash": page_hash,
@@ -279,42 +301,49 @@ def upsert_book(conn: sqlite3.Connection, book: Dict, record: Dict | None = None
           updated_at=excluded.updated_at
         """,
         {
-            "book_id": str(book.get("book_id", record.get("book_id", "")) or record.get("book_id", "")),
-            "json_path": str(book.get("json_path", record.get("json_path", "")) or record.get("json_path", "")),
-            "filename": str(book.get("filename", record.get("filename", "")) or record.get("filename", "")),
-            "source_root": str(book.get("source_root", record.get("source_root", "")) or record.get("source_root", "")),
-            "source_path": str(book.get("source_path", record.get("source_path", "")) or record.get("source_path", "")),
-            "source_relpath": str(book.get("source_relpath", record.get("source_relpath", "")) or record.get("source_relpath", "")),
-            "source_ext": str(book.get("source_ext", record.get("source_ext", "")) or record.get("source_ext", "")),
-            "source_type": str(book.get("source_type", record.get("source_type", "unknown")) or "unknown"),
-            "document_type": str(book.get("document_type", record.get("document_type", "book")) or "book"),
-            "language": str(book.get("language", record.get("language", "unknown")) or "unknown"),
-            "title": str(book.get("title", record.get("title", "")) or ""),
+            "book_id": str(
+                _coalesce(
+                    book.get("book_id"),
+                    record.get("book_id"),
+                    os.path.splitext(str(record.get("filename", "")))[0],
+                    default="",
+                )
+            ),
+            "json_path": str(_coalesce(book.get("json_path"), record.get("json_path"), default="")),
+            "filename": str(_coalesce(book.get("filename"), record.get("filename"), default="")),
+            "source_root": str(_coalesce(book.get("source_root"), record.get("source_root"), default="")),
+            "source_path": str(_coalesce(book.get("source_path"), record.get("source_path"), default="")),
+            "source_relpath": str(_coalesce(book.get("source_relpath"), record.get("source_relpath"), default="")),
+            "source_ext": str(_coalesce(book.get("source_ext"), record.get("source_ext"), default="")),
+            "source_type": str(_coalesce(book.get("source_type"), record.get("source_type"), default="unknown")),
+            "document_type": str(_coalesce(book.get("document_type"), record.get("document_type"), default="book")),
+            "language": str(_coalesce(book.get("language"), record.get("language"), default="unknown")),
+            "title": str(_coalesce(book.get("title"), record.get("title"), default="")),
             "size_bytes": _int(book.get("size_bytes", record.get("size_bytes", 0))),
             "total_pages": _int(book.get("total_pages", record.get("total_pages", 0))),
-            "source_hash": str(book.get("source_hash", record.get("source_hash", "")) or ""),
-            "content_hash": str(book.get("content_hash", record.get("content_hash", "")) or ""),
-            "text_hash": str(book.get("text_hash", record.get("text_hash", "")) or ""),
-            "text_simhash": _int(book.get("text_simhash", record.get("text_simhash", 0))),
-            "import_stage": _int(book.get("import_stage", record.get("import_stage", 1)), 1),
-            "pdf_pipeline": str(book.get("pdf_pipeline", record.get("pdf_pipeline", "")) or ""),
-            "pdf_ocr_strategy": str(book.get("pdf_ocr_strategy", record.get("pdf_ocr_strategy", "")) or ""),
-            "extractor": str(book.get("extractor", record.get("extractor", "")) or ""),
-            "conversion_status": str(book.get("conversion_status", record.get("conversion_status", "unknown")) or "unknown"),
-            "quality_status": str(book.get("quality_status", record.get("quality_status", "ok")) or "ok"),
-            "quality_reasons_json": _json(book.get("quality_reasons", record.get("quality_reasons", []))),
-            "quality_warnings_json": _json(book.get("quality_warnings", record.get("quality_warnings", []))),
-            "quality_metrics_json": _json(book.get("quality_metrics", record.get("quality_metrics", {}))),
-            "quality_expected_language": str(book.get("quality_expected_language", record.get("quality_expected_language", "")) or ""),
-            "quality_expected_arabic": _bool(book.get("quality_expected_arabic", record.get("quality_expected_arabic", False))),
-            "quality_detected_script": str(book.get("quality_detected_script", record.get("quality_detected_script", "")) or ""),
-            "review_status": str(book.get("review_status", record.get("review_status", "approved_auto")) or "approved_auto"),
-            "review_required": _bool(book.get("review_required", record.get("review_required", False))),
-            "review_route": str(book.get("review_route", record.get("review_route", "auto")) or "auto"),
-            "reviewed_by": str(book.get("reviewed_by", record.get("reviewed_by", "")) or ""),
-            "reviewed_at": str(book.get("reviewed_at", record.get("reviewed_at", "")) or ""),
-            "review_note": str(book.get("review_note", record.get("review_note", "")) or ""),
-            "ingest_ready": _bool(book.get("ingest_ready", record.get("ingest_ready", True))),
+            "source_hash": str(_coalesce(book.get("source_hash"), record.get("source_hash"), default="")),
+            "content_hash": str(_coalesce(book.get("content_hash"), record.get("content_hash"), default="")),
+            "text_hash": str(_coalesce(book.get("text_hash"), record.get("text_hash"), default="")),
+            "text_simhash": _sqlite_int64(_coalesce(book.get("text_simhash"), record.get("text_simhash"), default=0)),
+            "import_stage": _int(_coalesce(book.get("import_stage"), record.get("import_stage"), default=1), 1),
+            "pdf_pipeline": str(_coalesce(book.get("pdf_pipeline"), record.get("pdf_pipeline"), default="")),
+            "pdf_ocr_strategy": str(_coalesce(book.get("pdf_ocr_strategy"), record.get("pdf_ocr_strategy"), default="")),
+            "extractor": str(_coalesce(book.get("extractor"), record.get("extractor"), default="")),
+            "conversion_status": str(_coalesce(book.get("conversion_status"), record.get("conversion_status"), default="unknown")),
+            "quality_status": str(_coalesce(book.get("quality_status"), record.get("quality_status"), default="ok")),
+            "quality_reasons_json": _json(_coalesce(book.get("quality_reasons"), record.get("quality_reasons"), default=[])),
+            "quality_warnings_json": _json(_coalesce(book.get("quality_warnings"), record.get("quality_warnings"), default=[])),
+            "quality_metrics_json": _json(_coalesce(book.get("quality_metrics"), record.get("quality_metrics"), default={})),
+            "quality_expected_language": str(_coalesce(book.get("quality_expected_language"), record.get("quality_expected_language"), default="")),
+            "quality_expected_arabic": _bool(_coalesce(book.get("quality_expected_arabic"), record.get("quality_expected_arabic"), default=False)),
+            "quality_detected_script": str(_coalesce(book.get("quality_detected_script"), record.get("quality_detected_script"), default="")),
+            "review_status": str(_coalesce(book.get("review_status"), record.get("review_status"), default="approved_auto")),
+            "review_required": _bool(_coalesce(book.get("review_required"), record.get("review_required"), default=False)),
+            "review_route": str(_coalesce(book.get("review_route"), record.get("review_route"), default="auto")),
+            "reviewed_by": str(_coalesce(book.get("reviewed_by"), record.get("reviewed_by"), default="")),
+            "reviewed_at": str(_coalesce(book.get("reviewed_at"), record.get("reviewed_at"), default="")),
+            "review_note": str(_coalesce(book.get("review_note"), record.get("review_note"), default="")),
+            "ingest_ready": _bool(_coalesce(book.get("ingest_ready"), record.get("ingest_ready"), default=True)),
             "page_quality_summary_json": _json(book.get("page_quality_summary", {})),
             "page_ocr_candidates_json": _json(book.get("page_ocr_candidates", [])),
             "updated_at": now,
@@ -437,4 +466,3 @@ def record_review_action(
                 _now(),
             ),
         )
-

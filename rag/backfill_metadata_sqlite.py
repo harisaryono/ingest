@@ -63,6 +63,7 @@ def main() -> None:
     processed = 0
     imported = 0
     skipped = 0
+    errors = 0
     batch = 0
 
     with connect(args.db_path) as conn:
@@ -80,16 +81,23 @@ def main() -> None:
                 upsert_pages(conn, book)
                 imported += 1
                 batch += 1
-            except Exception:
+            except Exception as exc:
                 skipped += 1
+                errors += 1
+                print(f"WARN skip {json_path}: {exc}", flush=True)
             processed += 1
             if batch >= args.batch_size:
                 conn.commit()
                 batch = 0
+            if processed % 100 == 0:
+                print(
+                    f"progress processed={processed} imported={imported} skipped={skipped} errors={errors}",
+                    flush=True,
+                )
         if batch:
             conn.commit()
 
-    print(f"processed={processed} imported={imported} skipped={skipped} db={args.db_path}")
+    print(f"processed={processed} imported={imported} skipped={skipped} errors={errors} db={args.db_path}", flush=True)
 
 
 if __name__ == "__main__":
