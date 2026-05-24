@@ -2,35 +2,60 @@
 
 ## Ringkasan
 
-Repo ini sekarang berisi pipeline RAG lokal untuk koleksi buku Islam yang sudah dikonversi ke JSON.
+Repo ini sekarang adalah pipeline lokal untuk:
 
-Status data saat ini:
-- `315` buku
-- `7068` halaman total
-- sekitar `36.4 MB` data JSON sumber
-- bahasa terindeks: `id`, `en`, dan `ru`
+- konversi sumber buku ke JSON
+- review dan edit JSON dari web
+- dedupe konten antar format
+- metadata operasional di SQLite
+- ingest ke Qdrant lokal
+- search dan Q&A berbasis referensi
 
-Tujuan sistem:
-- user mencari atau bertanya dalam bahasa Indonesia
-- sistem menampilkan cuplikan relevan dan, bila perlu, jawaban ringkas berbasis referensi
-- hasil harus bisa ditelusuri ke buku dan halaman sumber
+Prinsip data:
+
+- **JSON** = isi buku
+- **SQLite** = indeks/status/review metadata
+- **Qdrant** = embedding dan retrieval
+
+## Status Arsitektur Saat Ini
+
+### Data content
+
+Isi buku tetap disimpan sebagai JSON per buku di:
+
+- `../DATABASE/json_output/`
+
+### Metadata operasional
+
+Status buku, status halaman, hash, review action, dan status OCR disimpan di:
+
+- `../DATABASE/review_metadata.sqlite`
+
+### Retrieval
+
+Retrieval memakai Qdrant lokal plus lexical cache. Hasil bisa dibaca di web atau dipakai sebagai konteks untuk generator.
+
+### Reference data
+
+Repo juga menyimpan referensi lokal untuk:
+
+- Qur'an
+- hadits
+- blok Arab hasil review
 
 ## Layout Repo
 
 ```
 ./
-├── .env.example
 ├── README.md
+├── .env.example
 ├── requirements.txt
-├── convert_to_json.py
-├── import_islamhouse.py
 ├── eval/
 │   └── queries.jsonl
-├── ../DATABASE/json_output/   # runtime data hasil konversi, di luar repo
-├── ../DATABASE/json_output/_content_index.json
-├── ../DATABASE/qdrant_db/     # runtime data vector store lokal, di luar repo
 ├── rag/
 │   ├── api.py
+│   ├── arabic_blocks.py
+│   ├── backfill_metadata_sqlite.py
 │   ├── chunker.py
 │   ├── config.py
 │   ├── dedupe_qdrant_storage.py
@@ -39,9 +64,12 @@ Tujuan sistem:
 │   ├── ingest.py
 │   ├── ingest_common.py
 │   ├── ingest_id.py
-│   ├── evaluate_retrieval.py
-│   ├── review_book.py
+│   ├── import_hadith_json.py
+│   ├── metadata_store.py
+│   ├── reference_replace.py
 │   ├── retriever.py
+│   ├── review_book.py
+│   ├── evaluate_retrieval.py
 │   ├── run_api.sh
 │   ├── run_ingest.sh
 │   └── static/index.html
@@ -49,221 +77,162 @@ Tujuan sistem:
 ```
 
 Catatan:
-- `../DATABASE/json_output/` dan `../DATABASE/qdrant_db/` sengaja tidak dipush ke git
-- file kerja yang dipush adalah kode, script, dan dokumentasi
-- `rag/run_api.sh` adalah launcher lokal untuk menyajikan UI search di `http://127.0.0.1:8000`
-- `import_islamhouse.py` menambahkan korpus Islamhouse ke `json_output/` sambil mengecek duplikasi konten dan kualitas ekstraksi terhadap JSON yang sudah ada
 
-## Arsitektur Runtime
-
-```
-[User] -> FastAPI -> Retriever -> Context -> Generator -> Answer/Sources
-                     ↘ /search langsung menampilkan cuplikan
-```
-
-Komponen runtime:
-- Embedding: `nomic-embed-text` via Ollama
-- Vector store: Qdrant lokal dengan path repo-relative
-- Generator lokal: `qwen3:4b` via Ollama
-- Generator besar: Lease Coordinator untuk model `gpt-oss-120b`
-- Frontend: HTML + vanilla JS
+- runtime data ada di `../DATABASE/`
+- runtime data tidak dipush ke GitHub
+- repo ini menyimpan kode, template, dan dokumentasi saja
 
 ## Keputusan Arsitektural
 
 | Komponen | Pilihan saat ini | Catatan |
 |----------|------------------|---------|
-| Embedding | `nomic-embed-text` via Ollama | dipakai untuk dokumen dan query |
-| Vector store | Qdrant lokal | disimpan di `../DATABASE/qdrant_db` |
-| Retrieval | Dense + lexical/BM25 hybrid | ada query expansion, concept coverage, dan skor komponen transparan |
+| Isi buku | JSON per buku | sumber utama untuk teks |
+| Metadata | SQLite | status review, hash, page quality, OCR flags |
+| Vector store | Qdrant lokal | untuk embedding retrieval |
+| Retrieval | Dense + lexical hybrid | ada rerank dan score komponen |
 | Generator lokal | `qwen3:4b` via Ollama | fallback cepat |
-| Generator besar | Lease Coordinator | untuk pertanyaan yang butuh kualitas lebih tinggi |
-| API backend | FastAPI | endpoint `/search`, `/ask`, `/books`, `/stats`, `/health` |
-| UI | Search-only page | fokus ke hasil pencarian dan cuplikan |
-| Bahasa | Default `id`, opsi `all` | metadata bahasa dipakai untuk filter |
+| Generator besar | Lease Coordinator | untuk jawaban yang butuh kualitas tinggi |
+| Review UI | FastAPI + HTML | daftar buku, editor, review halaman |
+| Reference data | Qur'an + hadits lokal | marker replacement offline-first |
 
-## Konfigurasi Inti
+## Alur Kerja Utama
 
-File konfigurasi: [`rag/config.py`](/media/harry/DATA120B/GIT/INGEST/rag/config.py)
+### 1. Konversi sumber ke JSON
 
-Konstanta yang dipakai sekarang:
+Sumber masuk dari folder lokal seperti:
 
-```python
-OLLAMA_BASE = "http://127.0.0.1:11434"
-EMBED_MODEL = "nomic-embed-text"
-LLM_MODEL = "qwen3:4b"
+- `Islamhouse/`
+- `IH/`
+- `BOOKS/AGAMA/`
 
-GENERATION_BACKEND = "auto"
-LEASE_COORDINATOR_URL = "http://127.0.0.1:9000/chat/completions"
-LEASE_MODEL = "gpt-oss-120b"
+Importer:
 
-QDRANT_PATH = "<repo>/../DATABASE/qdrant_db"
-INGEST_STATE_PATH = "<repo>/../DATABASE/qdrant_db/ingest_state.json"
-LEXICAL_INDEX_PATH = "<repo>/../DATABASE/lexical_index.pkl"
-JSON_DIR = "<repo>/../DATABASE/json_output"
-DATABASE_DIR = "<repo>/../DATABASE"
-COLLECTION_NAME = "buku_islam"
-VECTOR_DIM = 768
+- mengurutkan file kecil dulu
+- hash source file sebelum ekstraksi
+- melewati file yang sudah ada di cache atau family cache
+- mencatat duplicate dan quality issue
+- menyimpan hasil ke JSON corpus
 
-DEFAULT_TOP_K = 5
-RETRIEVAL_CANDIDATES = 20
-RETRIEVAL_CANDIDATES_PER_QUERY = 12
+### 2. Review dan edit
 
-CHUNK_MAX_CHARS = 500
-CHUNK_OVERLAP = 50
-CHUNK_MIN_CHARS = 80
+UI review yang aktif:
 
-EMBED_BATCH_SIZE = 64
-INGEST_BATCH_SIZE = 128
-EMBED_RETRY_COUNT = 3
-EMBED_TIMEOUT = 60
+- `/library`
+- `/books/{book_id}/pages/{page_num}/review`
+- `/books/{book_id}/edit`
+- `/books/{book_id}/raw`
+
+Fitur review:
+
+- edit JSON per halaman
+- edit JSON penuh
+- review halaman
+- review buku
+- preview sumber PDF asli sebagai image
+- marker replacement Qur'an dan hadits
+- pencarian hadits lokal dan Dorar
+- deteksi blok Arab untuk OCR per blok
+
+### 3. Metadata SQLite
+
+`review_metadata.sqlite` dipakai untuk:
+
+- `books`
+- `pages`
+- `book_families`
+- `review_actions`
+
+Gunanya:
+
+- status `pending_review`, `approved_manual`, `approved_lease`
+- `conversion_status`, `quality_status`, `ingest_ready`
+- `page_quality_status`, `page_ocr_needed`
+- `ocr_attempted`, `ocr_done`
+- catatan review
+
+### 4. Ingest ke Qdrant
+
+Setelah lolos review:
+
+```bash
+bash rag/run_ingest.sh
 ```
 
-## Chunking
+Atau:
 
-File: [`rag/chunker.py`](/media/harry/DATA120B/GIT/INGEST/rag/chunker.py)
-
-Strategi yang dipakai:
-- page dijadikan kandidat chunk
-- page yang terlalu panjang dipecah dengan overlap
-- page pendek yang noise di-skip
-- metadata buku dan halaman dibawa ke tiap chunk
-
-Metadata chunk yang disimpan:
-
-```python
-{
-    "book_id": "id-tata-cara-praktis-wudu",
-    "filename": "id-tata-cara-praktis-wudu.txt",
-    "title": "Tata Cara Praktis Wudhu",
-    "language": "id",
-    "page_start": 3,
-    "page_end": 4,
-    "chunk_idx": 0
-}
+```bash
+python3 rag/ingest.py
 ```
 
-## Embedding
+Ingest:
 
-File: [`rag/embeddings.py`](/media/harry/DATA120B/GIT/INGEST/rag/embeddings.py)
-
-Fungsi utama:
-- `embed_texts(texts)`
-- `embed_query(query)`
-
-Implementasi memakai Ollama embed API:
-
-```http
-POST /api/embed
-{"model": "nomic-embed-text", "input": [...]}
-```
-
-## Ingestion
-
-File: [`rag/ingest.py`](/media/harry/DATA120B/GIT/INGEST/rag/ingest.py)
-
-Perilaku ingest saat ini:
-- membaca JSON dari `../DATABASE/json_output/`
-- chunking per buku
+- membaca JSON aktif
+- chunking per buku dan per halaman
 - embedding batch
-- upsert ke Qdrant lokal
-- state disimpan di `../DATABASE/qdrant_db/ingest_state.json`
-- ingest bersifat idempotent
-- rerun tidak menambah data ganda untuk chunk yang sama
-- jika file berubah, data lama untuk buku itu dibersihkan lalu diinsert ulang
-- progress disimpan per batch agar proses bisa resume
+- upsert ke Qdrant
+- menyimpan state resume
 
-Komponen bantu:
-- [`rag/ingest_common.py`](/media/harry/DATA120B/GIT/INGEST/rag/ingest_common.py)
-- [`rag/ingest_id.py`](/media/harry/DATA120B/GIT/INGEST/rag/ingest_id.py)
-- [`rag/dedupe_qdrant_storage.py`](/media/harry/DATA120B/GIT/INGEST/rag/dedupe_qdrant_storage.py)
+### 5. Retrieval dan Q&A
 
-## Retrieval
+Pipeline retrieval:
 
-File: [`rag/retriever.py`](/media/harry/DATA120B/GIT/INGEST/rag/retriever.py)
-
-Retrieval sekarang bukan ChromaDB. Yang dipakai:
-- Qdrant local client
-- query embedding
-- lexical BM25 cache dari corpus JSON
-- beberapa query variant untuk expansion
-- rerank berbasis skor komponen:
-  - dense score
-  - BM25 score
-  - cakupan konsep query
-  - bonus judul
-  - penalti untuk chunk terlalu pendek
-  - penalti noise
-
-Alur:
 1. embed query
 2. ambil kandidat dari Qdrant
-3. rerank hasil
-4. return top-k
+3. ambil kandidat lexical bila perlu
+4. rerank dengan score komponen
+5. tampilkan cuplikan atau kirim ke generator
 
-Endpoint `/search` memakai retrieval ini tanpa LLM, sehingga aman untuk tampilkan cuplikan.
+Generator:
 
-## Generator
+- lokal untuk kasus ringan
+- Lease Coordinator untuk jawaban yang butuh kualitas lebih tinggi
 
-File: [`rag/generator.py`](/media/harry/DATA120B/GIT/INGEST/rag/generator.py)
+## PDF Pipeline
 
-Mode yang tersedia:
-- `local` -> Ollama `qwen3:4b`
-- `large` -> Lease Coordinator
-- `auto` -> pilih otomatis
-- `search_only` -> tampilkan raw chunks tanpa generasi jawaban
+Untuk PDF tahap 1:
 
-Mode `strict` membatasi jawaban hanya dari referensi yang diambil dari retrieval.
+1. `pdftotext`
+2. fallback `pdfminer`
+3. analisis kualitas per halaman
+4. tandai halaman yang perlu OCR
+5. OCR dilakukan per halaman yang memang bermasalah
 
-## API
+Tujuan:
 
-File: [`rag/api.py`](/media/harry/DATA120B/GIT/INGEST/rag/api.py)
+- cepat di tahap awal
+- jangan OCR semua halaman
+- OCR hanya pada halaman yang ditandai perlu
 
-Endpoint yang aktif:
+## Hadits dan Qur'an
 
-| Endpoint | Method | Fungsi |
-|----------|--------|--------|
-| `/health` | GET | cek service + Qdrant |
-| `/stats` | GET | jumlah buku, halaman, point, bahasa |
-| `/search` | GET | search chunk + skor + payload |
-| `/ask` | POST | retrieval + generasi jawaban |
-| `/books` | GET | daftar buku |
-| `/books/{book_id}` | GET | metadata buku |
-| `/books/{book_id}/pages/{page_num}` | GET | isi halaman tertentu |
-| `/debug/retrieve` | POST | raw retrieval untuk debugging + skor komponen |
+### Qur'an
 
-Static site dimount di root sehingga [`rag/static/index.html`](/media/harry/DATA120B/GIT/INGEST/rag/static/index.html) bisa dibuka langsung dari server FastAPI.
+- sumber lokal Uthmani
+- terjemahan Indonesia dan English lokal
+- offline-first
 
-## Frontend
+### Hadits
 
-File: [`rag/static/index.html`](/media/harry/DATA120B/GIT/INGEST/rag/static/index.html)
+- dataset lokal dari `AhmedBaset/hadith-json`
+- lookup lokal diprioritaskan
+- Dorar.net dipakai sebagai kandidat pencarian
+- marker replacement tidak auto-overwrite final tanpa review
 
-UI saat ini:
-- search-only
-- input query
-- pilihan bahasa
-- pilihan top-k
-- daftar hasil berisi score, title, book_id, halaman, filename, dan cuplikan
+## Status Target
 
-UI ini memang sengaja sederhana untuk fokus ke kualitas retrieval.
+Yang dianggap penting untuk kualitas repo ini:
 
-## Tahap Kerja
+- bisa diinstal ulang di mesin lain
+- bisa diaudit
+- bisa ditelusuri ke sumber
+- bisa gagal aman saat referensi tidak cukup
+- tidak perlu OCR atau LLM mahal untuk semua kasus
 
-1. Ingest data JSON ke Qdrant lokal
-2. Pastikan rerun aman dan tidak duplikatif
-3. Evaluasi kualitas retrieval dengan query nyata
-4. Tambah tuning query expansion dan rerank bila perlu
-5. Pakai `/ask` bila ingin jawaban generatif berbasis referensi
-6. Pertahankan `../DATABASE/json_output/` dan `../DATABASE/qdrant_db/` sebagai runtime data lokal di luar git
-7. Gunakan `rag/rebuild_qdrant.py` untuk archive lama dan rebuild database dengan journal resumable
-8. Gunakan `import_islamhouse.py` untuk ingest korpus `Islamhouse/` dengan content dedupe terhadap corpus JSON existing
+## Tahap Lanjutan
 
-## Catatan Operasional
+1. Lengkapi metadata SQLite untuk family duplicate dan review history
+2. Pertahankan JSON sebagai source of truth untuk isi buku
+3. Gunakan SQLite untuk status dan audit operasional
+4. Pertahankan retrieval hybrid
+5. Kecilkan tampilan UI supaya review harian tetap cepat
 
-- `../DATABASE/json_output/` adalah sumber data yang dipakai ingest
-- `../DATABASE/qdrant_db/` adalah state lokal vector store
-- `rag/rebuild_qdrant.py` membuat backup ke `../DATABASE/backups/` sebelum rebuild
-- `import_islamhouse.py` menulis manifest dedupe ke `../DATABASE/json_output/_duplicates.jsonl`, quality report ke `../DATABASE/json_output/_quality_issues.jsonl`, dan content catalog ke `../DATABASE/json_output/_content_index.json`
-- item yang belum lolos review ditandai `pending_review` dan tidak masuk ingest sampai di-approve manual atau lewat `rag/review_book.py`
-- keduanya tidak perlu dipush ke GitHub
-- perubahan yang dipush hanya kode, script, dan dokumentasi
-- dedupe chunk dibatasi per identitas buku/halaman/chunk agar sitasi tetap aman
